@@ -14,3 +14,9 @@
 	path = cub
 	url = https://github.com/NVlabs/cub
   shallow=true
+[submodule "beaver"]
+	path = beaver
+	url = https://github.com/sociomantic-tsunami/beaver.git
+[submodule "makd"]
+	path = makd
+	url = https://github.com/sociomantic-tsunami/makd.git

@@ -1,0 +1,19 @@
+libs = [VAR.shortname + '.a', VAR.shortname + '.so']
+
+OPTS = dict(
+    name = VAR.fullname,
+    description = 'Lightweight, portable deep learning library',
+    url = 'https://github.com/dmlc/mxnet',
+    maintainer = 'Sociomantic Tsunami <tsunami@sociomantic.com>',
+    vendor = 'Distributed (Deep) Machine Learning Community',
+    license = 'Apache License, Version 2.0',
+    category = 'libs',
+    provides = VAR.shortname,
+    conflicts = VAR.shortname,
+    depends = ['libc6', 'libstdc++6', 'libopenblas-base'],
+)
+
+ARGS = FUN.mapfiles('./lib', '/usr/lib', libs, append_suffix=False) + [
+    'LICENSE=/usr/share/doc/' + VAR.fullname + '/copyright',
+    'README.md=/usr/share/doc/' + VAR.fullname + '/',
+]
