@@ -20,6 +20,7 @@ env:
     global:
         # Make sure beaver is in the PATH
         - PATH="$(git config -f .gitmodules submodule.beaver.path)/bin:$PATH"
+        - BEAVER_DOCKER_VARS="LANG=C.UTF_8 LC_ALL=C.UTF-8"
     matrix:
         - DIST=trusty
         - DIST=xenial
