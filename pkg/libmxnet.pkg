@@ -2,7 +2,12 @@ libs = [VAR.shortname + '.a', VAR.shortname + '.so']
 
 OPTS = dict(
     name = VAR.fullname,
-    description = 'Lightweight, portable deep learning library',
+    description = '''\
+Lightweight, portable deep learning library
+ This package provides the core library exposing the MXNet C API.
+ .
+ It has been built with OpenCV and OpenMP support disabled.
+''',
     url = 'https://github.com/dmlc/mxnet',
     maintainer = 'Sociomantic Tsunami <tsunami@sociomantic.com>',
     vendor = 'Distributed (Deep) Machine Learning Community',
