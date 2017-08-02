@@ -18,7 +18,9 @@ It has been built with OpenCV and OpenMP support disabled.
     depends = ['libc6', 'libstdc++6', 'libopenblas-base'],
 )
 
+doc_install_dir = '/usr/share/doc/' + VAR.fullname + '/'
+
 ARGS = FUN.mapfiles('./lib', '/usr/lib', libs, append_suffix=False) + [
-    'LICENSE=/usr/share/doc/' + VAR.fullname + '/copyright',
-    'README.md=/usr/share/doc/' + VAR.fullname + '/',
+    'LICENSE=' + doc_install_dir + 'copyright',
+    'README.md=' + doc_install_dir,
 ]
