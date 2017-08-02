@@ -21,6 +21,8 @@ It has been built with OpenCV and OpenMP support disabled.
 doc_install_dir = '/usr/share/doc/' + VAR.fullname + '/'
 
 ARGS = FUN.mapfiles('./lib', '/usr/lib', libs, append_suffix=False) + [
-    'LICENSE=' + doc_install_dir + 'copyright',
+    'NOTICE=' + doc_install_dir + 'copyright',
+    'LICENSE=' + doc_install_dir,
+    'CONTRIBUTORS.md=' + doc_install_dir,
     'README.md=' + doc_install_dir,
 ]
