@@ -1,6 +1,6 @@
 libs = [VAR.shortname + '.a', VAR.shortname + '.so']
 
-OPTS = dict(
+OPTS.update(
     name = VAR.fullname,
     description = '''\
 Lightweight, portable deep learning library
@@ -20,9 +20,10 @@ It has been built with OpenCV and OpenMP support disabled.
 
 doc_install_dir = '/usr/share/doc/' + VAR.fullname + '/'
 
-ARGS = FUN.mapfiles('./lib', '/usr/lib', libs, append_suffix=False) + [
+ARGS.extend(FUN.mapfiles('./lib', '/usr/lib', libs, append_suffix=False))
+ARGS.extend([
     'NOTICE=' + doc_install_dir + 'copyright',
     'LICENSE=' + doc_install_dir,
     'CONTRIBUTORS.md=' + doc_install_dir,
     'README.md=' + doc_install_dir,
-]
+])
