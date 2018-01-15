@@ -10,9 +10,12 @@
 [submodule "nnvm"]
 	path = nnvm
 	url = https://github.com/dmlc/nnvm
+[submodule "dlpack"]
+	path = dlpack
+	url = https://github.com/dmlc/dlpack
 [submodule "cub"]
 	path = cub
-	url = https://github.com/NVlabs/cub
+	url = https://github.com/dmlc/cub
 [submodule "beaver"]
 	path = beaver
 	url = https://github.com/sociomantic-tsunami/beaver.git

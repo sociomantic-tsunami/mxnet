@@ -136,8 +136,8 @@ training one batch on a  two-layer neural network.
     # aggregate gradient and update
     fc1_wgrad[cpu]  = fc1_wgrad[gpu0] + fc1_wgrad[gpu1]
     fc2_wgrad[cpu]  = fc2_wgrad[gpu0] + fc2_wgrad[gpu1]
-    fc1_weight[cpu] -= lr *  fc1_wgrad[gpu0]
-    fc2_weight[cpu] -= lr *  fc2_wgrad[gpu0]
+    fc1_weight[cpu] -= lr *  fc1_wgrad[cpu]
+    fc2_weight[cpu] -= lr *  fc2_wgrad[cpu]
     fc1_weight[cpu].copyto(fc1_weight[gpu0] , fc1_weight[gpu1])
     fc2_weight[cpu].copyto(fc2_weight[gpu0] , fc2_weight[gpu1])
 ```
@@ -274,7 +274,7 @@ most existing code can be scheduled by the dependency engine in two steps:
 
 
 1. Allocate the variable tags associated with resources like memory blob, PRNGS.
-	- Call `push` with the execution function as the original code to execute, and put the variable tags of
+2. Call `push` with the execution function as the original code to execute, and put the variable tags of
   corresponding resources correctly in `read_vars` and `mutate_vars`.
 
 ## Implementing the Generic Dependency Engine
