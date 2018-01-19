@@ -14,7 +14,7 @@ scaling effectively to multiple GPUs and multiple machines.
 
 This package has been built with OpenCV and OpenMP support disabled.
 ''',
-    url = 'https://github.com/dmlc/mxnet',
+    url = 'https://github.com/sociomantic-tsunami/mxnet/',
     maintainer = 'Sociomantic Tsunami <tsunami@sociomantic.com>',
     vendor = 'Apache Software Foundation',
     license = 'Apache License, Version 2.0',
