@@ -17,7 +17,7 @@ env:
 install: beaver install
 
 script:
-    - beaver make USE_BLAS=openblas USE_OPENCV=0 USE_OPENMP=0
+    - beaver make USE_BLAS=openblas USE_OPENCV=0
     - beaver make -f makd/Makd.mak F=production pkg
 
 deploy:
