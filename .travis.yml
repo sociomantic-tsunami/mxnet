@@ -12,13 +12,13 @@ env:
         # Make sure beaver is in the PATH
         - PATH="$(git config -f .gitmodules submodule.beaver.path)/bin:$PATH"
     matrix:
-        - DIST=xenial
+        - DIST=xenial F=production
 
 install: beaver install
 
 script:
     - beaver make USE_BLAS=openblas USE_OPENCV=0
-    - beaver make -f makd/Makd.mak F=production pkg
+    - beaver run ./build-tsunami-package
 
 deploy:
     provider: script
