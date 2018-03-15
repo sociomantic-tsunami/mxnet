@@ -2,6 +2,7 @@ from os import listdir
 
 libdir = './lib'
 libs = listdir(libdir)
+dynamic_libs = [l for l in libs if l.endswith('.so')]
 
 OPTS.update(
     name = VAR.fullname,
@@ -24,7 +25,7 @@ This package has been built with OpenCV support disabled.
     category = 'libs',
     provides = VAR.shortname,
     conflicts = VAR.shortname,
-    depends = ['libc6', 'libstdc++6', 'libopenblas-base'],
+    depends = FUN.autodeps(dynamic_libs, path=libdir),
 )
 
 doc_install_dir = '/usr/share/doc/' + VAR.fullname + '/'
