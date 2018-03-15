@@ -12,7 +12,7 @@ on the fly.  A graph optimization layer on top of that makes symbolic
 execution fast and memory efficient.  MXNet is portable and lightweight,
 scaling effectively to multiple GPUs and multiple machines.
 
-This package has been built with OpenCV and OpenMP support disabled.
+This package has been built with OpenCV support disabled.
 ''',
     url = 'https://github.com/sociomantic-tsunami/mxnet/',
     maintainer = 'Sociomantic Tsunami <tsunami@sociomantic.com>',
