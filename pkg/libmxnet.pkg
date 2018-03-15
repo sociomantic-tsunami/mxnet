@@ -1,4 +1,7 @@
-libs = [VAR.shortname + '.a', VAR.shortname + '.so']
+from os import listdir
+
+libdir = './lib'
+libs = listdir(libdir)
 
 OPTS.update(
     name = VAR.fullname,
@@ -26,7 +29,7 @@ This package has been built with OpenCV support disabled.
 
 doc_install_dir = '/usr/share/doc/' + VAR.fullname + '/'
 
-ARGS.extend(FUN.mapfiles('./lib', '/usr/lib', libs, append_suffix=False))
+ARGS.extend(FUN.mapfiles(libdir, '/usr/lib', libs, append_suffix=False))
 ARGS.extend([
     'NOTICE=' + doc_install_dir + 'copyright',
     'LICENSE=' + doc_install_dir,
