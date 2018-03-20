@@ -6,7 +6,7 @@ dynamic_libs = [l for l in libs if l.endswith('.so')]
 
 OPTS.update(
     name = VAR.fullname,
-    description = '''\
+    description = '''efficient and flexible deep learning framework
 Apache MXNet (incubating) is a deep learning framework designed for
 both efficiency and flexibility.  It allows you to mix symbolic and
 imperative programming to maximize efficiency and productivity.  At
