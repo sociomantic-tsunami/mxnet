@@ -18,7 +18,7 @@ install: beaver install
 
 script:
     - beaver make USE_BLAS=openblas USE_OPENCV=0
-    - beaver run ./build-tsunami-package
+    - BEAVER_DOCKER_VARS="F" beaver run ./build-tsunami-package
 
 deploy:
     provider: script
