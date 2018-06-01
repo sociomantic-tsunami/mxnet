@@ -22,7 +22,7 @@ script:
 
 deploy:
     provider: script
-    script: beaver bintray upload -d sociomantic-tsunami/mxnet/libmxnet build/last/pkg/*.deb
+    script: ./upload-tsunami-package
     skip_cleanup: true
     on:
         tags: true
