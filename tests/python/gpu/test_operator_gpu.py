@@ -1133,14 +1133,17 @@ def test_fullyconnected_with_type():
 
 @with_seed()
 def test_activation_with_type():
-    sym = mx.sym.Activation(name='act', act_type='sigmoid')
-    ctx_list = [{'ctx': mx.gpu(0), 'act_data': (2, 2, 10, 10), 'type_dict': {'act_data': np.float64}},
-                {'ctx': mx.gpu(0), 'act_data': (2, 2, 10, 10), 'type_dict': {'act_data': np.float32}},
-                {'ctx': mx.gpu(0), 'act_data': (2, 2, 10, 10), 'type_dict': {'act_data': np.float16}},
-                {'ctx': mx.cpu(0), 'act_data': (2, 2, 10, 10), 'type_dict': {'act_data': np.float64}},
-                {'ctx': mx.cpu(0), 'act_data': (2, 2, 10, 10), 'type_dict': {'act_data': np.float32}},
-                {'ctx': mx.cpu(0), 'act_data': (2, 2, 10, 10), 'type_dict': {'act_data': np.float16}}]
-    check_consistency(sym, ctx_list)
+    act_types = ['relu', 'sigmoid', 'tanh', 'softrelu', 'softsign']
+    shape = (2, 2, 10, 10)
+    for act_type in act_types:
+        sym = mx.sym.Activation(name='act', act_type=act_type)
+        ctx_list = [{'ctx': mx.gpu(0), 'act_data': shape, 'type_dict': {'act_data': np.float64}},
+                    {'ctx': mx.gpu(0), 'act_data': shape, 'type_dict': {'act_data': np.float32}},
+                    {'ctx': mx.gpu(0), 'act_data': shape, 'type_dict': {'act_data': np.float16}},
+                    {'ctx': mx.cpu(0), 'act_data': shape, 'type_dict': {'act_data': np.float64}},
+                    {'ctx': mx.cpu(0), 'act_data': shape, 'type_dict': {'act_data': np.float32}},
+                    {'ctx': mx.cpu(0), 'act_data': shape, 'type_dict': {'act_data': np.float16}}]
+        check_consistency(sym, ctx_list)
 
 
 @with_seed()
@@ -1833,6 +1836,27 @@ def test_batchnorm_backwards_notrain():
                                          fix_gamma=False, cudnn_off=cudnn_o)
                 loss=y.square().sum()
             loss.backward(train_mode=False)
+
+
+@with_seed()
+def test_softmax_activation():
+    gpu_a = mx.nd.array([[3., 0.5, -0.5, 2., 7.],
+        [2., -.4, 7.,   3., 0.2]], ctx=mx.gpu(0))
+    cpu_a = mx.nd.array([[3., 0.5, -0.5, 2., 7.],
+        [2., -.4, 7.,   3., 0.2]], ctx=mx.cpu())
+
+    cpu_a.attach_grad()
+    gpu_a.attach_grad()
+    with mx.autograd.record():
+        gpu_y = mx.nd.SoftmaxActivation(data = gpu_a)
+        cpu_y = mx.nd.SoftmaxActivation(data = cpu_a)
+        assert_almost_equal(cpu_y.asnumpy(), gpu_y.asnumpy(), atol = 1e-3, rtol = 1e-3)
+
+        gpu_y.backward()
+        cpu_y.backward()
+        assert_almost_equal(cpu_a.grad.asnumpy(), gpu_a.grad.asnumpy(),
+                atol = 1e-3, rtol = 1e-3)
+
 
 if __name__ == '__main__':
     import nose

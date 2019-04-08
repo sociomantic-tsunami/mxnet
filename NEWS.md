@@ -1,5 +1,33 @@
 MXNet Change Log
 ================
+## 1.2.1
+### Deprecations
+The [usage](https://github.com/apache/incubator-mxnet/issues/11091) of `save_params` described in the [gluon book](https://github.com/zackchase/mxnet-the-straight-dope/blob/master/chapter07_distributed-learning/hybridize.ipynb) did not reflect the intended usage of the API and led MXNet users to depend on the unintended usage of `save_params` and `load_params`. In 1.2.0 release an internal bug fix was made which broke the unintended usage use case and users scripts.
+To correct the API change, the behavior of `save_params` API has been reverted to the behavior of MXNet v1.1.0 in v1.2.1. The intended and correct use are now supported with the new APIs `save_parameters` and `load_parameters`.
+With v1.2.1, usage of `save_params` and `load_params` APIs will resume their former functionality and a deprecation warning will appear.
+All scripts to save and load parameters for a Gluon model should use the new APIs: `save_parameters` and `load_parameters`. If your model is hybridizable and you want to export a serialized structure of the model as well as parameters you should migrate your code to use `export` API and the newly added `imports` API instead of `save_params` and `load_params` API. Please refer to the [Saving and Loading Gluon Models Tutorial](http://mxnet.incubator.apache.org/versions/1.2.0/tutorials/gluon/save_load_params.html) for more information.
+
+### User Code Changes
+- If you have been using the `save_params` and `load_params` API, below are the recommendations on how to update your code:
+1. If you save parameters to load it back into a `SymbolBlock`, it is strongly recommended to use `export` and `imports` API instead. For more information, please see the [Saving and Loading Gluon Models Tutorial](http://mxnet.incubator.apache.org/versions/1.2.0/tutorials/gluon/save_load_params.html).
+2. If you created gluon layers without a `name_scope` using MXNet 1.2.0, you must replace `save_params` with `save_parameters`. Otherwise, your models saved in 1.2.1 will fail to load back, although this worked in 1.2.0.
+3. For the other use cases, such as models created within a `name_scope` (inside a `with name_scope()` block) or models being loaded back into gluon and not `SymbolBlock`, we strongly recommend replacing `save_params` and `load_params` with `save_parameters` and `load_parameters`. Having said that, your code won't break in 1.2.1 but will give you a deprecated warning message for `save_params` and `load_params`.
+
+### Incompatible API Changes
+- We are breaking semantic versioning by making a backwards incompatible change from 1.2.0 in the 1.2.1 patch release. The breaking use case is documented in point 2 above. The reason for doing this is because the 1.2.0 release broke a documented [use case](https://github.com/apache/incubator-mxnet/issues/11091) from the [gluon book](https://github.com/zackchase/mxnet-the-straight-dope/blob/master/chapter07_distributed-learning/hybridize.ipynb) and this release reverts the breakage.
+- We did break the promise with semantic versioning due to the API behavior change in 1.2.0 and the backward incompatible change between 1.2.0 and 1.2.1 patch release. The breaking use case is documented in point 2 above. The reason for doing this is because the 1.2.0 release broke a documented [use case](https://github.com/apache/incubator-mxnet/issues/11091) from the [gluon book](https://github.com/zackchase/mxnet-the-straight-dope/blob/master/chapter07_distributed-learning/hybridize.ipynb) and this release reverts the breakage. As a community, we apologize for the inconvenience caused and will continue to strive to uphold semantic versioning.
+
+### Bug Fixes
+- Fixed MKLDNN bugs (#10613, #10021, #10616, #10764, #10591, #10731, #10918, #10706, #10651, #10979).
+- Fixed Scala Inference Memory leak (#11216).
+- Fixed Cross Compilation for armv7 (#11054).
+
+### Performance Improvements
+- Reduced memory consumption from inplace operation for ReLU activation (#10847).
+- Improved `slice` operator performance by 20x (#11124).
+- Improved performance of depthwise convolution by using cudnnv7 if available (#11076).
+- Improved performance and memory usage of Conv1D, by adding back cuDNN support for Conv1D (#11270). This adds a known issue: The cuDNN convolution operator may throw `CUDNN_STATUS_EXECUTION_FAILED` when `req == "add"` and `cudnn_tune != off` with large inputs(e.g. 64k channels). If you encounter this issue, please consider setting `MXNET_CUDNN_AUTOTUNE_DEFAULT` to 0.
+
 ## 1.2.0
 ### New Features - Added Scala Inference APIs
 - Implemented new [Scala Inference APIs](https://cwiki.apache.org/confluence/display/MXNET/MXNetScalaInferenceAPI) which offer an easy-to-use, Scala Idiomatic and thread-safe high level APIs for performing predictions with deep learning models trained with MXNet (#9678). Implemented a new ImageClassifier class which provides APIs for classification tasks on a Java BufferedImage using a pre-trained model you provide (#10054). Implemented a new ObjectDetector class which provides APIs for object and boundary detections on a Java BufferedImage using a pre-trained model you provide (#10229).

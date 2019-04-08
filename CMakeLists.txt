@@ -187,8 +187,12 @@ endif()
 
 if(USE_MKL_IF_AVAILABLE)
   if(USE_MKLDNN)
+    # We need to use generic archtecture. Otherwise, MKLDNN compiled in one
+    # CPU architecture (e.g., C5) can't run on another architecture (e.g., g3).
+    set(ARCH_OPT_FLAGS "-mtune=generic")
     add_subdirectory(3rdparty/mkldnn)
     include_directories(3rdparty/mkldnn/include)
+    add_definitions(-DMXNET_USE_MKLDNN=1)
     list(APPEND mxnet_LINKER_LIBS mkldnn)
   endif()
   find_package(MKL)
@@ -196,10 +200,6 @@ if(USE_MKL_IF_AVAILABLE)
   if(MKL_FOUND)
     include_directories(${MKL_INCLUDE_DIR})
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/operator/mkl)
-
-    if(USE_MKLDNN)
-      add_definitions(-DMXNET_USE_MKLDNN=1)
-    endif()
 
     add_definitions(-DUSE_MKL=1)
     add_definitions(-DCUB_MKL=1)
@@ -353,7 +353,11 @@ if(USE_OPENMP)
   find_package(OpenMP REQUIRED)
   # This should build on Windows, but there's some problem and I don't have a Windows box, so
   # could a Windows user please fix?
-  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/openmp/CMakeLists.txt AND SYSTEM_ARCHITECTURE STREQUAL "x86_64" AND NOT MSVC)
+  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/openmp/CMakeLists.txt
+     AND SYSTEM_ARCHITECTURE STREQUAL "x86_64"
+     AND NOT MSVC
+     AND NOT CMAKE_CROSSCOMPILING)
+
     # Intel/llvm OpenMP: https://github.com/llvm-mirror/openmp
     set(OPENMP_STANDALONE_BUILD TRUE)
     set(LIBOMP_ENABLE_SHARED TRUE)
