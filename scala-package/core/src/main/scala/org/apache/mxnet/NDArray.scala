@@ -28,14 +28,17 @@ import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import scala.ref.WeakReference
 
 /**
- * NDArray API of mxnet
- */
+  * NDArray Object extends from NDArrayBase for abstract function signatures
+  * Main code will be generated during compile time through Macros
+  */
 @AddNDArrayFunctions(false)
-object NDArray {
+object NDArray extends NDArrayBase {
   implicit def getFirstResult(ret: NDArrayFuncReturn): NDArray = ret(0)
   private val logger = LoggerFactory.getLogger(classOf[NDArray])
 
   private val functions: Map[String, NDArrayFunction] = initNDArrayModule()
+
+  val api = NDArrayAPI
 
   private def addDependency(froms: Array[NDArray], tos: Array[NDArray]): Unit = {
     froms.foreach { from =>
@@ -63,12 +66,12 @@ object NDArray {
     val ndArgs = ArrayBuffer.empty[NDArray]
     val posArgs = ArrayBuffer.empty[String]
     args.foreach {
-      case arr: NDArray =>
-        ndArgs.append(arr)
-      case arrFunRet: NDArrayFuncReturn =>
-        arrFunRet.arr.foreach(ndArgs.append(_))
-      case arg =>
-        posArgs.append(arg.toString)
+        case arr: NDArray =>
+          ndArgs.append(arr)
+        case arrFunRet: NDArrayFuncReturn =>
+          arrFunRet.arr.foreach(ndArgs.append(_))
+        case arg =>
+          posArgs.append(arg.toString)
     }
 
     require(posArgs.length <= function.arguments.length,
@@ -79,13 +82,18 @@ object NDArray {
         ++ function.arguments.slice(0, posArgs.length).zip(posArgs) - "out"
       ).map { case (k, v) => k -> v.toString }
 
+
     val (oriOutputs, outputVars) =
       if (kwargs != null && kwargs.contains("out")) {
         val output = kwargs("out")
         output match {
           case nd: NDArray => (Array(nd), Array(nd.handle))
           case ndFuncRet: NDArrayFuncReturn => (ndFuncRet.arr, ndFuncRet.arr.map(_.handle))
-          case ndArr: Seq[NDArray] => (ndArr.toArray, ndArr.toArray.map(_.handle))
+         // Seq[NDArray] erasure problem explained here https://stackoverflow.com/questions/1094173/
+          case ndArr: Seq[NDArray @unchecked] =>
+            if (ndArr.head.isInstanceOf[NDArray]) (ndArr.toArray, ndArr.toArray.map(_.handle))
+            else throw new IllegalArgumentException(
+              "Unsupported out var type, should be NDArray or subclass of Seq[NDArray]")
           case _ => throw new IllegalArgumentException(
             "Unsupported out var type, should be NDArray or subclass of Seq[NDArray]")
         }
@@ -395,6 +403,9 @@ object NDArray {
    * @param stop End of interval.
    * @param step Spacing between values. The default step size is 1.
    * @param repeat Number of times to repeat each element. The default repeat count is 1.
+   * @param infer_range
+   *          When set to True, infer the stop position from the start, step,
+   *          repeat, and output tensor size.
    * @param ctx Device context. Default context is the current default context.
    * @param dType The data type of the `NDArray`. The default datatype is `DType.Float32`.
    * @return NDArray of evenly spaced values in the specified range.
@@ -535,6 +546,10 @@ object NDArray {
     new NDArray(handleRef.value)
   }
 
+  private def _crop_assign(kwargs: Map[String, Any] = null)(args: Any*) : NDArrayFuncReturn = {
+    genericNDArrayFunctionInvoke("_crop_assign", args, kwargs)
+  }
+
   // TODO: imdecode
 }
 
@@ -546,11 +561,16 @@ object NDArray {
  * </b>
  */
 class NDArray private[mxnet](private[mxnet] val handle: NDArrayHandle,
-                             val writable: Boolean = true) extends WarnIfNotDisposed {
+                             val writable: Boolean = true,
+                             addToCollector: Boolean = true) extends WarnIfNotDisposed {
+  if (addToCollector) {
+    NDArrayCollector.collect(this)
+  }
+
   // record arrays who construct this array instance
   // we use weak reference to prevent gc blocking
   private[mxnet] val dependencies = mutable.HashMap.empty[Long, WeakReference[NDArray]]
-  private var disposed = false
+  @volatile private var disposed = false
   def isDisposed: Boolean = disposed
 
   def serialize(): Array[Byte] = {

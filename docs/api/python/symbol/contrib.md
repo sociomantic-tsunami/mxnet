@@ -45,12 +45,16 @@ In the rest of this document, we list routines provided by the `symbol.contrib` 
     MultiProposal
     PSROIPooling
     Proposal
+    ROIAlign
     count_sketch
     ctc_loss
     dequantize
     fft
     ifft
     quantize
+    foreach
+    while_loop
+    cond
 ```
 
 ## API Reference

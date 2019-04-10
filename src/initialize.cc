@@ -25,6 +25,10 @@
 #include <signal.h>
 #include <dmlc/logging.h>
 #include <mxnet/engine.h>
+#include "./engine/openmp.h"
+#if MXNET_USE_OPENCV
+#include <opencv2/opencv.hpp>
+#endif  // MXNET_USE_OPENCV
 
 namespace mxnet {
 #if MXNET_USE_SIGNAL_HANDLER && DMLC_LOG_STACK_TRACE
@@ -41,6 +45,27 @@ class LibraryInitializer {
     dmlc::InitLogging("mxnet");
 #if MXNET_USE_SIGNAL_HANDLER && DMLC_LOG_STACK_TRACE
     signal(SIGSEGV, SegfaultLogger);
+#endif
+
+// disable openmp for multithreaded workers
+#ifndef _WIN32
+    pthread_atfork(
+      []() {
+        Engine::Get()->Stop();
+      },
+      []() {
+        Engine::Get()->Start();
+      },
+      []() {
+        // Make children single threaded since they are typically workers
+        dmlc::SetEnv("MXNET_CPU_WORKER_NTHREADS", 1);
+        dmlc::SetEnv("OMP_NUM_THREADS", 1);
+#if MXNET_USE_OPENCV
+        cv::setNumThreads(0);  // disable opencv threading
+#endif  // MXNET_USE_OPENCV
+        engine::OpenMP::Get()->set_enabled(false);
+        Engine::Get()->Start();
+      });
 #endif
   }
 

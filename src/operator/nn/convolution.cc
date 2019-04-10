@@ -29,7 +29,7 @@
 #include "./mkldnn/mkldnn_ops-inl.h"
 #include "./mkldnn/mkldnn_base-inl.h"
 #if MXNET_USE_NNPACK == 1
-#include "./nnpack/nnpack_convolution-inl.h"
+#include "../nnpack/nnpack_pooling-inl.h"
 #endif  // MXNET_USE_NNPACK
 
 namespace mxnet {
@@ -54,7 +54,8 @@ static void ConvolutionComputeExCPU(const nnvm::NodeAttrs& attrs,
                                     const std::vector<NDArray>& inputs,
                                     const std::vector<OpReqType>& req,
                                     const std::vector<NDArray>& outputs) {
-  if (SupportMKLDNNConv(inputs[0])) {
+  const ConvolutionParam& params = nnvm::get<ConvolutionParam>(attrs.parsed);
+  if (SupportMKLDNNConv(params, inputs[0])) {
     MKLDNN_OPCHECK_INIT(false, outputs.size(), inputs, outputs);
     MKLDNNConvolutionForward(attrs, ctx, inputs, req, outputs);
     MKLDNN_OPCHECK_RUN(ConvolutionCompute<cpu>, attrs, ctx, inputs, req, outputs);
@@ -68,7 +69,8 @@ static void ConvolutionGradComputeExCPU(const nnvm::NodeAttrs& attrs,
                                         const std::vector<NDArray>& inputs,
                                         const std::vector<OpReqType>& req,
                                         const std::vector<NDArray>& outputs) {
-  if (SupportMKLDNNConv(inputs[0])) {
+  const ConvolutionParam& params = nnvm::get<ConvolutionParam>(attrs.parsed);
+  if (SupportMKLDNNConv(params, inputs[0])) {
     MKLDNN_OPCHECK_INIT(true, outputs.size(), inputs, outputs);
     MKLDNNConvolutionBackward(attrs, ctx, inputs, req, outputs);
     MKLDNN_OPCHECK_RUN(ConvolutionGradCompute<cpu>, attrs, ctx, inputs, req, outputs);
@@ -298,7 +300,9 @@ inline static bool ConvStorageType(const nnvm::NodeAttrs& attrs,
 
   DispatchMode wanted_mode;
 #if MXNET_USE_MKLDNN == 1
-  if (dev_mask == mshadow::cpu::kDevMask)
+  if (dev_mask == mshadow::cpu::kDevMask && !MKLDNNEnvSet())
+    wanted_mode = DispatchMode::kFComputeFallback;
+  else if (dev_mask == mshadow::cpu::kDevMask)
     wanted_mode = DispatchMode::kFComputeEx;
   else
 #endif
@@ -320,7 +324,9 @@ inline static bool BackwardConvStorageType(const nnvm::NodeAttrs& attrs,
 
   DispatchMode wanted_mode;
 #if MXNET_USE_MKLDNN == 1
-  if (dev_mask == mshadow::cpu::kDevMask)
+  if (dev_mask == mshadow::cpu::kDevMask && !MKLDNNEnvSet())
+    wanted_mode = DispatchMode::kFComputeFallback;
+  else if (dev_mask == mshadow::cpu::kDevMask)
     wanted_mode = DispatchMode::kFComputeEx;
   else
 #endif
@@ -329,7 +335,7 @@ inline static bool BackwardConvStorageType(const nnvm::NodeAttrs& attrs,
                              dispatch_mode, wanted_mode);
 }
 
-static void ConvolutionParamParser(nnvm::NodeAttrs* attrs) {
+void ConvolutionParamParser(nnvm::NodeAttrs* attrs) {
   using namespace mshadow;
   ConvolutionParam param_;
   try {
@@ -363,6 +369,18 @@ static void ConvolutionParamParser(nnvm::NodeAttrs* attrs) {
     if (param_.dilate.ndim() == 0) param_.dilate = Shape3(1, 1, 1);
     if (param_.pad.ndim() == 0) param_.pad = Shape3(0, 0, 0);
   }
+  CHECK_EQ(param_.kernel.ndim(), param_.stride.ndim())
+    << "Stride must have the same number of dimensions with kernel_size,"
+    << "but kernel_size is set to " << param_.kernel << " while stride is "
+    << param_.stride;
+  CHECK_EQ(param_.kernel.ndim(), param_.dilate.ndim())
+    << "Dilate must have the same number of dimensions with kernel_size,"
+    << "but kernel_size is set to " << param_.kernel << " while dilate is "
+    << param_.dilate;
+  CHECK_EQ(param_.kernel.ndim(), param_.pad.ndim())
+    << "Padding must have the same number of dimensions with kernel_size,"
+    << "but kernel_size is set to " << param_.kernel << " while padding is "
+    << param_.pad;
   attrs->parsed = std::move(param_);
 }
 
@@ -412,7 +430,7 @@ then we have::
 If ``no_bias`` is set to be true, then the ``bias`` term is ignored.
 
 The default data ``layout`` is *NCHW*, namely *(batch_size, channel, height,
-width)*. We can choose other layouts such as *NHWC*.
+width)*. We can choose other layouts such as *NWC*.
 
 If ``num_group`` is larger than 1, denoted by *g*, then split the input ``data``
 evenly into *g* parts along the channel axis, and also evenly split ``weight``

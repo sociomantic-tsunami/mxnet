@@ -28,6 +28,27 @@
 namespace mxnet {
 namespace op {
 
+/*
+ * \brief returns true if all indices are between [min, max]
+ * \param data_ptr the indices to check
+ * \param data_size the number of indices to examine
+ * \param min the expected min value for indices
+ * \param max the expected max value for indices
+ */
+template<typename DType>
+bool CheckIndexOutOfBound(const DType* data_ptr, size_t data_size,
+                          const DType min, const DType max) {
+  bool is_valid = true;
+  for (size_t i = 0; i < data_size; i++) {
+    if (data_ptr[i] > max || data_ptr[i] < min) {
+      is_valid = false;
+      break;
+    }
+  }
+  return is_valid;
+}
+
+
 template<>
 void SparseEmbeddingOpForwardRspImpl<cpu>(const OpContext& ctx,
                                           const TBlob& data,
@@ -48,18 +69,16 @@ void SparseEmbeddingOpForwardRspImpl<cpu>(const OpContext& ctx,
     return;
   }
   // check out-of-bound indices
-  bool is_valid = true;
   MSHADOW_TYPE_SWITCH(data.type_flag_, DType, {
     DType min = 0;
     DType max = static_cast<DType>(weight.shape()[0] - 1);
     // check with single thread is faster since data is small
     DType* data_ptr = data.dptr<DType>();
     size_t data_size = data.shape_.Size();
-    for (size_t i = 0; i < data_size; i++) {
-      if (data_ptr[i] > max || data_ptr[i] < min) is_valid = false;
-    }
+    bool is_valid = CheckIndexOutOfBound(data_ptr, data_size,
+                                         min, max);
+    CHECK(is_valid) << "SparseEmbedding input contains data out of bound";
   })
-  CHECK(is_valid) << "SparseEmbedding input contains data out of bound";
   // the weight is actually dense
   if (weight.aux_shape(kIdx)[0] == weight.shape()[0]) {
     EmbeddingOpForwardDnsImpl<cpu>(s, data, weight.data(), req, output);
@@ -70,7 +89,7 @@ void SparseEmbeddingOpForwardRspImpl<cpu>(const OpContext& ctx,
 
 
 template<>
-inline void SparseEmbeddingOpBackwardRspImpl<cpu>(const SparseEmbeddingParam& param,
+inline void SparseEmbeddingOpBackwardRspImpl<cpu>(const bool deterministic,
                                                   const OpContext& ctx,
                                                   const TBlob& ograd,
                                                   const TBlob& data,
@@ -101,6 +120,15 @@ inline void SparseEmbeddingOpBackwardRspImpl<cpu>(const SparseEmbeddingParam& pa
   MSHADOW_TYPE_SWITCH(data.type_flag_, IType, {
     MSHADOW_SGL_DBL_TYPE_SWITCH(ograd.type_flag_, DType, {
       MSHADOW_IDX_TYPE_SWITCH(output.aux_type(kIdx), RType, {
+        // check out of bound indices
+        {
+          IType min = 0;
+          IType max = static_cast<IType>(output.shape()[0] - 1);
+          // check with single thread is faster since data is small
+          IType* data_ptr = data.dptr<IType>();
+          bool is_valid = CheckIndexOutOfBound(data_ptr, data.shape_.Size(), min, max);
+          CHECK(is_valid) << "Embedding input contains data out of bound";
+        }
         // mark row flags
         Fill<false>(s, TBlob(row_flg, Shape1(num_rows), cpu::kDevMask), kWriteTo, 0);
         Kernel<MarkRowFlgKernel, cpu>::Launch(s, data_size, row_flg, data.dptr<IType>());
@@ -185,6 +213,7 @@ DMLC_REGISTER_PARAMETER(OneHotParam);
 DMLC_REGISTER_PARAMETER(ScatterNDParam);
 
 NNVM_REGISTER_OP(Embedding)
+MXNET_ADD_SPARSE_OP_ALIAS(Embedding)
 .describe(R"code(Maps integer indices to vector representations (embeddings).
 
 This operator maps words to real-valued vectors in a high-dimensional space,
@@ -224,6 +253,17 @@ Examples::
                            [[  0.,   1.,   2.,   3.,   4.],
                             [ 10.,  11.,  12.,  13.,  14.]]]
 
+
+The storage type of weight can be either row_sparse or default.
+
+.. Note::
+
+    If "sparse_grad" is set to True, the storage type of gradient w.r.t weights will be
+    "row_sparse". Only a subset of optimizers support sparse gradients, including SGD, AdaGrad
+    and Adam. Note that by default lazy updates is turned on, which may perform differently
+    from standard updates. For more details, please check the Optimization API at:
+    https://mxnet.incubator.apache.org/api/python/optimization/optimization.html
+
 )code" ADD_FILELINE)
 .set_num_inputs(2)
 .set_num_outputs(1)
@@ -234,11 +274,13 @@ Examples::
   })
 .set_attr<nnvm::FInferShape>("FInferShape", EmbeddingOpShape<EmbeddingParam>)
 .set_attr<nnvm::FInferType>("FInferType", EmbeddingOpType<EmbeddingParam>)
+.set_attr<FInferStorageType>("FInferStorageType", EmbeddingOpForwardStorageType)
 .set_attr<FResourceRequest>("FResourceRequest",
   [](const NodeAttrs& attrs) {
     return std::vector<ResourceRequest>{ResourceRequest::kTempSpace};
   })
 .set_attr<FCompute>("FCompute<cpu>", EmbeddingOpForward<cpu>)
+.set_attr<FComputeEx>("FComputeEx<cpu>", SparseEmbeddingOpForwardEx<cpu>)
 .set_attr<nnvm::FGradient>("FGradient",
   [](const nnvm::NodePtr& n, const std::vector<nnvm::NodeEntry>& ograds) {
     return MakeNonlossGradNode("_backward_Embedding", n, ograds,
@@ -250,6 +292,8 @@ Examples::
 
 NNVM_REGISTER_OP(_contrib_SparseEmbedding)
 .describe(R"code(Maps integer indices to vector representations (embeddings).
+
+note:: ``contrib.SparseEmbedding`` is deprecated, use ``Embedding`` instead.
 
 This operator maps words to real-valued vectors in a high-dimensional space,
 called word embeddings. These embeddings can capture semantic and syntactic properties of the words.
@@ -263,8 +307,7 @@ All the input values should be integers in the range [0, input_dim).
 If the input_dim is ip0 and output_dim is op0, then shape of the embedding weight matrix must be
 (ip0, op0).
 
-The storage type of weight must be `row_sparse`, and the gradient of the weight will be of
-`row_sparse` storage type, too.
+The storage type of the gradient will be `row_sparse`.
 
 .. Note::
 
@@ -272,9 +315,8 @@ The storage type of weight must be `row_sparse`, and the gradient of the weight 
     The operator is available on both CPU and GPU.
     When `deterministic` is set to `True`, the accumulation of gradients follows a
     deterministic order if a feature appears multiple times in the input. However, the
-    accumulation is usually slower when the order is enforced.
-    When the operator is used in recurrent neural network models on the GPU,
-    the recommended value for `deterministic` is `True`.
+    accumulation is usually slower when the order is enforced on GPU.
+    When the operator is used on the GPU, the recommended value for `deterministic` is `True`.
 
 Examples::
 
@@ -326,12 +368,15 @@ Examples::
 NNVM_REGISTER_OP(_backward_Embedding)
 .set_num_inputs(2)
 .set_num_outputs(2)
+.set_attr_parser(ParamParser<EmbeddingParam>)
 .set_attr<FResourceRequest>("FResourceRequest",
   [](const NodeAttrs& attrs) {
     return std::vector<ResourceRequest>{ResourceRequest::kTempSpace};
   })
+.set_attr<FInferStorageType>("FInferStorageType", EmbeddingOpBackwardStorageType)
 .set_attr<nnvm::TIsBackward>("TIsBackward", true)
-.set_attr<FCompute>("FCompute<cpu>", EmbeddingOpBackward<cpu>);
+.set_attr<FCompute>("FCompute<cpu>", EmbeddingOpBackward<cpu>)
+.set_attr<FComputeEx>("FComputeEx<cpu>", EmbeddingOpBackwardEx<cpu>);
 
 NNVM_REGISTER_OP(_backward_SparseEmbedding)
 .set_attr_parser(ParamParser<SparseEmbeddingParam>)
@@ -350,36 +395,46 @@ NNVM_REGISTER_OP(take)
 
 This function slices the input array along a particular axis with the provided indices.
 
-Given an input array with shape ``(d0, d1, d2)`` and indices with shape ``(i0, i1)``, the output
-will have shape ``(i0, i1, d1, d2)``, computed by::
-
-  output[i,j,:,:] = input[indices[i,j],:,:]
-
-.. note::
-   - `axis`- Only slicing along axis 0 is supported for now.
-   - `mode`- Only `clip` mode is supported for now.
+Given data tensor of rank r >= 1, and indices tensor of rank q, gather entries of the axis
+dimension of data (by default outer-most one as axis=0) indexed by indices, and concatenates them
+in an output tensor of rank q + (r - 1).
 
 Examples::
   x = [4.  5.  6.]
 
   // Trivial case, take the second element along the first axis.
+
   take(x, [1]) = [ 5. ]
+
+  // The other trivial case, axis=-1, take the third element along the first axis
+
+  take(x, [3], axis=-1, mode='clip') = [ 6. ]
 
   x = [[ 1.,  2.],
        [ 3.,  4.],
        [ 5.,  6.]]
 
   // In this case we will get rows 0 and 1, then 1 and 2. Along axis 0
+
   take(x, [[0,1],[1,2]]) = [[[ 1.,  2.],
                              [ 3.,  4.]],
 
                             [[ 3.,  4.],
                              [ 5.,  6.]]]
 
+  // In this case we will get rows 0 and 1, then 1 and 2 (calculated by wrapping around).
+  // Along axis 1
+
+  take(x, [[0, 3], [-1, -2]], axis=1, mode='wrap') = [[[ 1.,  2.],
+                                                       [ 3.,  4.]],
+
+                                                      [[ 3.,  4.],
+                                                       [ 5.,  6.]]]
+
 )code" ADD_FILELINE)
 .set_num_inputs(2)
 .set_num_outputs(1)
-.set_attr_parser(TakeParamParser<TakeParam>)
+.set_attr_parser(ParamParser<TakeParam>)
 .set_attr<nnvm::FListInputNames>("FListInputNames",
   [](const NodeAttrs& attrs) {
     return std::vector<std::string>{"a", "indices"};
@@ -403,6 +458,7 @@ Examples::
 NNVM_REGISTER_OP(_backward_take)
 .set_num_inputs(2)
 .set_num_outputs(2)
+.set_attr_parser(ParamParser<TakeParam>)
 .set_attr<FResourceRequest>("FResourceRequest",
   [](const NodeAttrs& attrs) {
     return std::vector<ResourceRequest>{ResourceRequest::kTempSpace};
@@ -514,6 +570,10 @@ Examples::
   indices = [[1, 1, 0], [0, 1, 0]]
   gather_nd(data, indices) = [2, 3, 0]
 
+  data = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+  indices = [[0, 1], [1, 0]]
+  gather_nd(data, indices) = [[3, 4], [5, 6]]
+
 )code")
 .set_num_outputs(1)
 .set_num_inputs(2)
@@ -572,6 +632,21 @@ Examples::
   indices = [[1, 1, 0], [0, 1, 0]]
   shape = (2, 2)
   scatter_nd(data, indices, shape) = [[0, 0], [2, 3]]
+
+  data = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+  indices = [[0, 1], [1, 1]]
+  shape = (2, 2, 2, 2)
+  scatter_nd(data, indices, shape) = [[[[0, 0],
+                                        [0, 0]],
+
+                                       [[1, 2],
+                                        [3, 4]]],
+
+                                      [[[0, 0],
+                                        [0, 0]],
+
+                                       [[5, 6],
+                                        [7, 8]]]]
 
 )code")
 .set_num_outputs(1)
@@ -670,7 +745,9 @@ Examples::
 NNVM_REGISTER_OP(_scatter_set_nd)
 .describe(R"code(This operator has the same functionality as scatter_nd
 except that it does not reset the elements not indexed by the input
-index `NDArray` in the input data `NDArray`.
+index `NDArray` in the input data `NDArray`. output should be explicitly
+given and be the same as lhs.
+
 .. note:: This operator is for internal use only.
 
 Examples::
@@ -678,21 +755,62 @@ Examples::
   data = [2, 3, 0]
   indices = [[1, 1, 0], [0, 1, 0]]
   out = [[1, 1], [1, 1]]
-  scatter_nd(data=data, indices=indices, out=out)
+  _scatter_set_nd(lhs=out, rhs=data, indices=indices, out=out)
   out = [[0, 1], [2, 3]]
 
 )code")
 .set_num_outputs(1)
-.set_num_inputs(2)
+.set_num_inputs(3)
 .set_attr_parser(ParamParser<ScatterNDParam>)
 .set_attr<nnvm::FListInputNames>("FListInputNames",
   [](const NodeAttrs& attrs) {
-    return std::vector<std::string>{"data", "indices"};
+    return std::vector<std::string>{"lhs", "rhs", "indices"};
   })
-.set_attr<nnvm::FInferShape>("FInferShape", ScatterNDShape)
-.set_attr<nnvm::FInferType>("FInferType", ScatterNDType)
+.set_attr<nnvm::FInferShape>("FInferShape",
+  [](const nnvm::NodeAttrs& attrs,
+     std::vector<TShape> *in_attrs,
+     std::vector<TShape> *out_attrs) {
+    CHECK_EQ(in_attrs->size(), 3U);
+    CHECK_EQ(out_attrs->size(), 1U);
+    SHAPE_ASSIGN_CHECK(*in_attrs, 0, out_attrs->at(0));
+    SHAPE_ASSIGN_CHECK(*out_attrs, 0, in_attrs->at(0));
+    std::vector<TShape> tmp_in_attrs = {in_attrs->at(1), in_attrs->at(2)};
+    if (!ScatterNDShape(attrs, &tmp_in_attrs, out_attrs)) {
+      return false;
+    }
+    SHAPE_ASSIGN_CHECK(*in_attrs, 1, tmp_in_attrs[0]);
+    SHAPE_ASSIGN_CHECK(*in_attrs, 2, tmp_in_attrs[1]);
+    SHAPE_ASSIGN_CHECK(*in_attrs, 0, out_attrs->at(0));
+    return true;
+  })
+.set_attr<nnvm::FInferType>("FInferType",
+  [](const nnvm::NodeAttrs& attrs,
+     std::vector<int> *in_attrs,
+     std::vector<int> *out_attrs) {
+    CHECK_EQ(in_attrs->size(), 3U);
+    CHECK_EQ(out_attrs->size(), 1U);
+    TYPE_ASSIGN_CHECK(*in_attrs, 0, out_attrs->at(0));
+    TYPE_ASSIGN_CHECK(*out_attrs, 0, in_attrs->at(0));
+    std::vector<int> tmp_in_attrs = {in_attrs->at(1), in_attrs->at(2)};
+    if (!ScatterNDType(attrs, &tmp_in_attrs, out_attrs)) {
+      return false;
+    }
+    TYPE_ASSIGN_CHECK(*in_attrs, 1, tmp_in_attrs[0]);
+    TYPE_ASSIGN_CHECK(*in_attrs, 2, tmp_in_attrs[1]);
+    TYPE_ASSIGN_CHECK(*in_attrs, 0, out_attrs->at(0));
+    return true;
+  })
 .set_attr<FCompute>("FCompute<cpu>", ScatterSetNDForward<cpu>)
-.add_argument("data", "NDArray-or-Symbol", "data")
+.set_attr<nnvm::FInplaceOption>("FInplaceOption",
+  [](const NodeAttrs& attrs) {
+    return std::vector<std::pair<int, int> >{{0, 0}};
+  })
+.set_attr<nnvm::FInplaceIdentity>("FInplaceIdentity",
+  [](const NodeAttrs& attrs){
+    return std::vector<bool>{true};
+  })
+.add_argument("lhs", "NDArray-or-Symbol", "source input")
+.add_argument("rhs", "NDArray-or-Symbol", "value to assign")
 .add_argument("indices", "NDArray-or-Symbol", "indices")
 .add_arguments(ScatterNDParam::__FIELDS__());
 

@@ -206,7 +206,7 @@ class DropoutOp {
                                     const real_t pkeep) {
       RNG_KERNEL_LOOP(xpu, DType, id, gen, N, step, {
         const real_t rand_num = static_cast<real_t>(genImpl.uniform());
-        mask_out[i] = mshadow_op::threshold::Map<real_t>(rand_num, pkeep) * (1.0f / pkeep);
+        mask_out[i] = mshadow_op::threshold_eq::Map<real_t>(rand_num, pkeep) * (1.0f / pkeep);
         dropout_out[i] = input_data[i] * mask_out[i];
       });
     }
@@ -258,6 +258,7 @@ class DropoutOp {
                                         this->pkeep_);
             return;
           }
+
           // initialize the mask
           LaunchRNG<BernoulliKernel, xpu>(s, pgen, mask.Size(),
                                           mask.dptr<DType>(),
@@ -375,7 +376,7 @@ void DropoutCompute(const nnvm::NodeAttrs& attrs,
                     const std::vector<TBlob>& outputs) {
   const DropoutParam& param = nnvm::get<DropoutParam>(attrs.parsed);
   MSHADOW_REAL_TYPE_SWITCH(inputs[0].type_flag_, DType, {
-    static thread_local DropoutOp<xpu, DType> op;
+    DropoutOp<xpu, DType> op;
     op.Init(param);
     op.Forward(ctx, inputs, req, outputs);
   });
@@ -397,7 +398,7 @@ void DropoutGradCompute(const nnvm::NodeAttrs& attrs,
   out_data[dropout::kMask] = inputs[1];
 
   MSHADOW_REAL_TYPE_SWITCH(inputs[0].type_flag_, DType, {
-    static thread_local DropoutOp<xpu, DType> op;
+    DropoutOp<xpu, DType> op;
     op.Init(param);
     op.Backward(ctx, out_grads, out_data, req, outputs);
   });

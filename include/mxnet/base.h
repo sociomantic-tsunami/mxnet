@@ -102,9 +102,9 @@
 /*! \brief major version */
 #define MXNET_MAJOR 1
 /*! \brief minor version */
-#define MXNET_MINOR 2
+#define MXNET_MINOR 3
 /*! \brief patch version */
-#define MXNET_PATCH 0
+#define MXNET_PATCH 1
 /*! \brief mxnet version */
 #define MXNET_VERSION (MXNET_MAJOR*10000 + MXNET_MINOR*100 + MXNET_PATCH)
 /*! \brief helper for making version number */
@@ -218,6 +218,19 @@ struct Context {
    */
   inline static Context GPU(int32_t dev_id = -1);
   /*!
+   * Get the number of GPUs available.
+   * \return The number of GPUs that are available.
+   */
+  inline static int32_t GetGPUCount();
+  /*!
+   * \brief get the free and total available memory on a GPU
+   * \param dev the GPU number to query
+   * \param free_mem pointer to the uint64_t holding free GPU memory
+   * \param total_mem pointer to the uint64_t holding total GPU memory
+   * \return No return value
+   */
+  inline static void GetGPUMemoryInformation(int dev, uint64_t *free, uint64_t *total);
+  /*!
    * Create a pinned CPU context.
    * \param dev_id the device id for corresponding GPU.
    * \return Pinned CPU context. -1 for current GPU.
@@ -307,6 +320,49 @@ inline Context Context::GPU(int32_t dev_id) {
   return Create(kGPU, dev_id);
 }
 
+inline int32_t Context::GetGPUCount() {
+#if MXNET_USE_CUDA
+  int32_t count;
+  cudaError_t e = cudaGetDeviceCount(&count);
+  if (e == cudaErrorNoDevice) {
+    return 0;
+  }
+  CHECK_EQ(e, cudaSuccess) << " CUDA: " << cudaGetErrorString(e);
+  return count;
+#else
+  return 0;
+#endif
+}
+
+inline void Context::GetGPUMemoryInformation(int dev, uint64_t *free_mem,
+                                             uint64_t *total_mem) {
+#if MXNET_USE_CUDA
+
+  size_t memF, memT;
+  cudaError_t e;
+
+  int curDevice;
+  e = cudaGetDevice(&curDevice);
+  CHECK_EQ(e, cudaSuccess) << " CUDA: " << cudaGetErrorString(e);
+
+  e = cudaSetDevice(dev);
+  CHECK_EQ(e, cudaSuccess) << " CUDA: " << cudaGetErrorString(e);
+
+  e = cudaMemGetInfo(&memF, &memT);
+  CHECK_EQ(e, cudaSuccess) << " CUDA: " << cudaGetErrorString(e);
+
+  e = cudaSetDevice(curDevice);
+  CHECK_EQ(e, cudaSuccess) << " CUDA: " << cudaGetErrorString(e);
+
+  *free_mem = static_cast<uint64_t>(memF);
+  *total_mem = static_cast<uint64_t>(memT);
+
+#else
+  LOG(FATAL)
+      << "This call is only supported for MXNet built with CUDA support.";
+#endif
+}
+
 inline Context Context::FromString(const std::string& str) {
   Context ret;
   try {
@@ -361,6 +417,17 @@ constexpr size_t kMKLDNNAlign = 64;
 #endif
 
 }  // namespace mxnet
+
+namespace std {
+template<> struct hash<mxnet::Context> {
+  size_t operator()(const mxnet::Context& ctx) const {
+    size_t res = 0;
+    res = dmlc::HashCombine(res, static_cast<size_t>(ctx.dev_type));
+    res = dmlc::HashCombine(res, static_cast<size_t>(ctx.dev_id));
+    return res;
+  }
+};
+}
 
 #include "./tensor_blob.h"
 //! \endcond

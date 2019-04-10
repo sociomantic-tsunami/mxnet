@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 #pragma once
 
 
@@ -392,12 +411,7 @@ GpuCTC<ProbT>::compute_log_probs(const ProbT* const activations) {
         denoms_, out_dim_, num_elements);
 
     // compute denominators for softmax
-    denoms_handle = reduce_with_axis<red::sum, false>(
-        F<mxnet::op::mshadow_op::exp>(
-            log_probs_handle -
-            broadcast<0>(reduce_with_axis<red::maximum, false>(log_probs_handle, 1),
-                         log_probs_handle.shape_)),
-        1);
+    denoms_handle = reduce_with_axis<red::sum, false>(F<mxnet::op::mshadow_op::exp>(log_probs_handle), 1);
 
     // Kernel launch to calculate probabilities
     compute_log_probs_kernel<ProbT, VT><<<grid_size, NT, 0, stream_>>>
