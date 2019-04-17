@@ -54,10 +54,11 @@ class MKLDNNPoolingFwd {
   }
 
   ~MKLDNNPoolingFwd() {}
-  void SetDataHandle(const mxnet::NDArray &data,
-                     const mxnet::NDArray &output,
-                     const mxnet::NDArray *workspace = nullptr);
-  void Execute();
+  void SetNewMem(const NDArray& in_data,
+                 const NDArray& out_data,
+                 const OpReqType& req,
+                 const mxnet::NDArray *workspace = nullptr);
+  void Execute(const NDArray& out_data);
 
  private:
   bool is_train_;
@@ -68,6 +69,7 @@ class MKLDNNPoolingFwd {
   std::shared_ptr<mkldnn::memory> data_;
   std::shared_ptr<mkldnn::memory> out_;
   std::shared_ptr<mkldnn::memory> workspace_;
+  mkldnn_output_t output_mem_t_;
 
  private:
   void Init(const mxnet::NDArray &input,
@@ -92,12 +94,18 @@ inline bool SupportMKLDNNPooling(const PoolingParam &param,
 
   if (param.pooling_convention == pool_enum::kValid)
     return true;
+  else
+    return false;
 
+// need to support pooling convention full
+// https://issues.apache.org/jira/browse/MXNET-33
+#if 0
   if (((dshape[2] + 2 * param.pad[0] - param.kernel[0]) % param.stride[0] == 0) &&
       ((dshape[3] + 2 * param.pad[1] - param.kernel[1]) % param.stride[1] == 0))
     return true;
   else
     return false;
+#endif
 }
 
 inline bool MKLDNNRequireWorkspace(const PoolingParam &param) {
@@ -113,6 +121,10 @@ void MKLDNNPoolingGradCompute(const OpContext &ctx, const PoolingParam &param,
                               const NDArray &out_grad, const NDArray &in_data,
                               const NDArray *workspace, const OpReqType req,
                               const NDArray &in_grad);
+MKLDNNPoolingFwd &GetPoolingFwd(const PoolingParam &param,
+                                const bool is_train,
+                                const NDArray &data,
+                                const NDArray &output);
 }  // namespace op
 }  // namespace mxnet
 #endif  // MXNET_USE_MKLDNN == 1

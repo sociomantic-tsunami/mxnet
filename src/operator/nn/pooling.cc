@@ -26,7 +26,7 @@
 #include "../elemwise_op_common.h"
 #include "./pooling-inl.h"
 #if MXNET_USE_NNPACK == 1
-#include "./nnpack/nnpack_pooling-inl.h"
+#include "../nnpack/nnpack_pooling-inl.h"
 #endif  // MXNET_USE_NNPACK
 #if MXNET_USE_MKLDNN == 1
 #include "./mkldnn/mkldnn_pooling-inl.h"
@@ -35,7 +35,7 @@
 namespace mxnet {
 namespace op {
 
-static void PoolingParamParser(nnvm::NodeAttrs *attrs) {
+void PoolingParamParser(nnvm::NodeAttrs *attrs) {
   using namespace mshadow;
   PoolingParam param;
   param.Init(attrs->dict);
@@ -92,6 +92,9 @@ static bool PoolingShape(const nnvm::NodeAttrs &attrs,
                          std::vector<TShape> *out_shape) {
   const PoolingParam &param = nnvm::get<PoolingParam>(attrs.parsed);
   CHECK_EQ(in_shape->size(), 1U);
+  if (param.pool_type == pool_enum::kLpPooling) {
+    CHECK(param.p_value.has_value());
+  }
   const TShape &dshape = (*in_shape)[0];
   CHECK_GE(dshape.ndim(), 3U)
       << "Pooling: Input data should be  3D in (batch, channel, x)"
@@ -220,12 +223,20 @@ void PoolingComputeExCPU(const nnvm::NodeAttrs &attrs, const OpContext &ctx,
                          const std::vector<NDArray> &outputs) {
   const PoolingParam &param = nnvm::get<PoolingParam>(attrs.parsed);
   const NDArray *workspace = nullptr;
-  if (MKLDNNRequireWorkspace(param)) {
-    CHECK_GT(outputs.size(), 1U);
-    workspace = &outputs[1];
+
+  // Pooling does not currently support working with views
+  if (inputs[0].IsView() || outputs[0].IsView()) {
+    FallBackCompute(PoolingCompute<cpu>, attrs, ctx, inputs, req, outputs);
+    return;
   }
-  if (SupportMKLDNN(inputs[0])
-      && SupportMKLDNNPooling(param, inputs[0].shape())) {
+
+
+  if (SupportMKLDNN(inputs[0]) &&
+      SupportMKLDNNPooling(param, inputs[0].shape())) {
+    if (MKLDNNRequireWorkspace(param)) {
+      CHECK_GT(outputs.size(), 1U);
+      workspace = &outputs[1];
+    }
     MKLDNN_OPCHECK_INIT(false, 1, inputs, outputs);
     MKLDNNPoolingCompute(ctx, param, inputs[0], req[0], outputs[0], workspace);
     MKLDNN_OPCHECK_RUN(PoolingCompute<cpu>, attrs, ctx, inputs, req, outputs);
@@ -239,23 +250,31 @@ void PoolingGradComputeExCPU(const nnvm::NodeAttrs &attrs, const OpContext &ctx,
                              const std::vector<OpReqType> &req,
                              const std::vector<NDArray> &outputs) {
   const PoolingParam &param = nnvm::get<PoolingParam>(attrs.parsed);
-  const NDArray &out_grad = inputs[0];
-  const NDArray *workspace = nullptr;
-  const NDArray *in_data = nullptr;
-  if (MKLDNNRequireWorkspace(param)) {
-    // The first two elements are the gradient of the outputs in forward.
-    // The third is the input of forward.
-    // The fourth and the fifth are the outputs of forward.
-    CHECK_EQ(inputs.size(), 5U);
-    in_data = &inputs[2];
-    workspace = &inputs[4];
-  } else {
-    CHECK_EQ(inputs.size(), 3U);
-    in_data = &inputs[1];
+
+  // Pooling does not currently support working with views
+  if (inputs[0].IsView() || outputs[0].IsView()) {
+    FallBackCompute(PoolingGradCompute<cpu>, attrs, ctx, inputs, req, outputs);
+    return;
   }
-  const NDArray &in_grad = outputs[0];
+
+
   if (SupportMKLDNN(inputs[0])
       && SupportMKLDNNPooling(param, inputs[0].shape())) {
+    const NDArray &out_grad = inputs[0];
+    const NDArray *workspace = nullptr;
+    const NDArray *in_data = nullptr;
+    if (MKLDNNRequireWorkspace(param)) {
+      // The first two elements are the gradient of the outputs in forward.
+      // The third is the input of forward.
+      // The fourth and the fifth are the outputs of forward.
+      CHECK_EQ(inputs.size(), 5U);
+      in_data = &inputs[2];
+      workspace = &inputs[4];
+    } else {
+      CHECK_EQ(inputs.size(), 3U);
+      in_data = &inputs[1];
+    }
+    const NDArray &in_grad = outputs[0];
     MKLDNN_OPCHECK_INIT(true, outputs.size(), inputs, outputs);
     MKLDNNPoolingGradCompute(ctx, param, out_grad, *in_data, workspace,
                              req[0], in_grad);
@@ -276,7 +295,10 @@ inline static bool PoolingStorageType(const nnvm::NodeAttrs &attrs,
 
 #if MXNET_USE_MKLDNN == 1
   const PoolingParam &param = nnvm::get<PoolingParam>(attrs.parsed);
-  if (dev_mask == mshadow::cpu::kDevMask && SupportMKLDNNPooling(param)) {
+  if (dev_mask == mshadow::cpu::kDevMask && !MKLDNNEnvSet()) {
+    return storage_type_assign(out_attrs, mxnet::kDefaultStorage,
+                        dispatch_mode, DispatchMode::kFComputeFallback);
+  } else if (dev_mask == mshadow::cpu::kDevMask && SupportMKLDNNPooling(param)) {
     return storage_type_assign(out_attrs, mxnet::kDefaultStorage,
                                dispatch_mode, DispatchMode::kFComputeEx);
   }
@@ -297,7 +319,10 @@ inline static bool BackwardPoolingStorageType(const nnvm::NodeAttrs &attrs,
   CHECK_EQ(out_attrs->size(), 1);
 
 #if MXNET_USE_MKLDNN == 1
-  if (dev_mask == mshadow::cpu::kDevMask && SupportMKLDNNPooling(param)) {
+  if (dev_mask == mshadow::cpu::kDevMask && !MKLDNNEnvSet()) {
+    return storage_type_assign(out_attrs, mxnet::kDefaultStorage,
+                               dispatch_mode, DispatchMode::kFComputeFallback);
+  } else if (dev_mask == mshadow::cpu::kDevMask && SupportMKLDNNPooling(param)) {
     return storage_type_assign(out_attrs, mxnet::kDefaultStorage,
                                dispatch_mode, DispatchMode::kFComputeEx);
   }
@@ -344,10 +369,21 @@ Three pooling options are supported by ``pool_type``:
 - **avg**: average pooling
 - **max**: max pooling
 - **sum**: sum pooling
+- **lp**: Lp pooling
 
 For 3-D pooling, an additional *depth* dimension is added before
 *height*. Namely the input data will have shape *(batch_size, channel, depth,
 height, width)*.
+
+Notes on Lp pooling:
+
+Lp pooling was first introduced by this paper: https://arxiv.org/pdf/1204.3968.pdf.
+L-1 pooling is simply sum pooling, while L-inf pooling is simply max pooling.
+We can see that Lp pooling stands between those two, in practice the most common value for p is 2.
+
+For each window ``X``, the mathematical expression for Lp pooling is:
+
+:math:`f(X) = \sqrt[p]{\sum_{x}^{X} x^p}`
 
 )code" ADD_FILELINE)
 .set_num_inputs(1)

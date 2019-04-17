@@ -305,8 +305,7 @@ def grad(heads, variables, head_grads=None, retain_graph=None, create_graph=Fals
     >>> with mx.autograd.record():
     ...     z = mx.nd.elemwise_add(mx.nd.exp(x), x)
     >>> dx = mx.autograd.grad(z, [x], create_graph=True)
-    >>> dx.backward()
-    >>> print(dx.grad)
+    >>> print(dx)
     [
     [ 3.71828175]
     <NDArray 1 @cpu(0)>]
@@ -466,7 +465,7 @@ class Function(object):
                         "autograd.Function.backward must return NDArrays, not %s"%type(ret)
                     if req == 0:  # null
                         return True
-                    elif req == 1 or req == 2:  # write or inplace
+                    elif req in (1, 2):  # write or inplace
                         igrad[:] = ret
                     elif req == 'add':
                         igrad[:] += ret

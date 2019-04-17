@@ -42,13 +42,13 @@ from ..base import NotSupportedForSparseNDArray
 from ..base import _LIB, numeric_types
 from ..base import c_array_buf, mx_real_t, integer_types
 from ..base import mx_uint, NDArrayHandle, check_call
-from ..context import Context
+from ..context import Context, current_context
 from . import _internal
 from . import op
 try:
-    from .gen_sparse import * # pylint: disable=redefined-builtin
+    from .gen_sparse import retain as gs_retain # pylint: disable=redefined-builtin
 except ImportError:
-    pass
+    gs_retain = None
 from ._internal import _set_ndarray_class
 from .ndarray import NDArray, _storage_type, _DTYPE_NP_TO_MX, _DTYPE_MX_TO_NP
 from .ndarray import _STORAGE_TYPE_STR_TO_ID, _STORAGE_TYPE_ROW_SPARSE, _STORAGE_TYPE_CSR
@@ -527,7 +527,7 @@ class CSRNDArray(BaseSparseNDArray):
             return super(CSRNDArray, self).copyto(other)
         elif isinstance(other, NDArray):
             stype = other.stype
-            if stype == 'default' or stype == 'csr':
+            if stype in ('default', 'csr'):
                 return super(CSRNDArray, self).copyto(other)
             else:
                 raise TypeError('copyto does not support destination NDArray stype ' + str(stype))
@@ -774,7 +774,7 @@ class RowSparseNDArray(BaseSparseNDArray):
             return super(RowSparseNDArray, self).copyto(other)
         elif isinstance(other, NDArray):
             stype = other.stype
-            if stype == 'default' or stype == 'row_sparse':
+            if stype in ('default', 'row_sparse'):
                 return super(RowSparseNDArray, self).copyto(other)
             else:
                 raise TypeError('copyto does not support destination NDArray stype ' + str(stype))
@@ -787,7 +787,9 @@ class RowSparseNDArray(BaseSparseNDArray):
         The arguments are the same as for :py:func:`retain`, with
         this array as data.
         """
-        return retain(self, *args, **kwargs)
+        if not gs_retain:
+            raise ImportError("gen_sparse could not be imported")
+        return gs_retain(*args, **kwargs)
 
 def _prepare_src_array(source_array, dtype):
     """Prepare `source_array` so that it can be used to construct NDArray.
@@ -977,7 +979,7 @@ def _csr_matrix_from_definition(data, indices, indptr, shape=None, ctx=None,
     # pylint: disable= no-member, protected-access
     storage_type = 'csr'
     # context
-    ctx = Context.default_ctx if ctx is None else ctx
+    ctx = current_context() if ctx is None else ctx
     # types
     dtype = _prepare_default_dtype(data, dtype)
     indptr_type = _STORAGE_AUX_TYPES[storage_type][0] if indptr_type is None else indptr_type
@@ -1140,7 +1142,7 @@ def _row_sparse_ndarray_from_definition(data, indices, shape=None, ctx=None,
     """Create a `RowSparseNDArray` based on data and indices"""
     storage_type = 'row_sparse'
     # context
-    ctx = Context.default_ctx if ctx is None else ctx
+    ctx = current_context() if ctx is None else ctx
     # types
     dtype = _prepare_default_dtype(data, dtype)
     indices_type = _STORAGE_AUX_TYPES[storage_type][0] if indices_type is None else indices_type
@@ -1529,9 +1531,9 @@ def zeros(stype, shape, ctx=None, dtype=None, **kwargs):
     if stype == 'default':
         return _zeros_ndarray(shape, ctx=ctx, dtype=dtype, **kwargs)
     if ctx is None:
-        ctx = Context.default_ctx
+        ctx = current_context()
     dtype = mx_real_t if dtype is None else dtype
-    if stype == 'row_sparse' or stype == 'csr':
+    if stype in ('row_sparse', 'csr'):
         aux_types = _STORAGE_AUX_TYPES[stype]
     else:
         raise ValueError("unknown storage type" + stype)
@@ -1562,11 +1564,11 @@ def empty(stype, shape, ctx=None, dtype=None):
     if isinstance(shape, int):
         shape = (shape, )
     if ctx is None:
-        ctx = Context.default_ctx
+        ctx = current_context()
     if dtype is None:
         dtype = mx_real_t
     assert(stype is not None)
-    if stype == 'csr' or stype == 'row_sparse':
+    if stype in ('csr', 'row_sparse'):
         return zeros(stype, shape, ctx=ctx, dtype=dtype)
     else:
         raise Exception("unknown stype : " + str(stype))
@@ -1603,7 +1605,7 @@ def array(source_array, ctx=None, dtype=None):
     >>> mx.nd.sparse.array(mx.nd.sparse.zeros('row_sparse', (3, 2)))
     <RowSparseNDArray 3x2 @cpu(0)>
     """
-    ctx = Context.default_ctx if ctx is None else ctx
+    ctx = current_context() if ctx is None else ctx
     if isinstance(source_array, NDArray):
         assert(source_array.stype != 'default'), \
                "Please use `tostype` to create RowSparseNDArray or CSRNDArray from an NDArray"

@@ -26,6 +26,10 @@
 #include <mxnet/c_api.h>
 #include <mxnet/executor.h>
 #include "./c_api_common.h"
+#include "../executor/graph_executor.h"
+#if MXNET_USE_TENSORRT
+#include "../executor/trt_graph_executor.h"
+#endif  // MXNET_USE_TENSORRT
 
 int MXExecutorPrint(ExecutorHandle handle, const char **out_str) {
   Executor *exec = static_cast<Executor*>(handle);
@@ -439,13 +443,38 @@ int MXExecutorSimpleBind(SymbolHandle symbol_handle,
   std::vector<NDArray> in_arg_vec;
   std::vector<NDArray> arg_grad_vec;
   std::vector<NDArray> aux_state_vec;
-
-  *out = Executor::SimpleBind(*sym, ctx, ctx_map, in_arg_ctx_vec, arg_grad_ctx_vec,
-                              aux_state_ctx_vec, arg_shape_map, arg_dtype_map, arg_stype_map,
-                              grad_req_type_vec, shared_arg_name_set, &in_arg_vec,
-                              &arg_grad_vec, &aux_state_vec,
-                              use_shared_buffer ? &shared_buffer_map : nullptr,
-                              reinterpret_cast<Executor*>(shared_exec_handle));
+#if MXNET_USE_TENSORRT
+  // If we've built with TensorRT support we by default return an TRTExecutor.
+  // Users can override this behaviour via env var, which is useful for example for A/B
+  // performance testing.
+  if (dmlc::GetEnv("MXNET_USE_TENSORRT", false)) {
+    *out = exec::TrtGraphExecutor::TensorRTBind(*sym, ctx, ctx_map, &in_arg_ctx_vec,
+                                                &arg_grad_ctx_vec, &aux_state_ctx_vec,
+                                                &arg_shape_map, &arg_dtype_map, &arg_stype_map,
+                                                &grad_req_type_vec, shared_arg_name_set,
+                                                &in_arg_vec, &arg_grad_vec, &aux_state_vec,
+                                                use_shared_buffer ? &shared_buffer_map : nullptr,
+                                                reinterpret_cast<Executor*>(shared_exec_handle));
+  } else {
+    // Checks to see if this env var has been set to true or false by the user.
+    // If the user is using a TensorRT build, but has not enabled TRT at inference time, warn
+    // them and describe further steps.
+    const int unset_indicator =  std::numeric_limits<int>::quiet_NaN();
+    if (dmlc::GetEnv("MXNET_USE_TENSORRT", unset_indicator) == unset_indicator) {
+      LOG(INFO) << "TensorRT not enabled by default.  Please set the MXNET_USE_TENSORRT "
+                   "environment variable to 1 or call mx.contrib.tensorrt.set_use_tensorrt(True) "
+                   "to enable.";
+    }
+#endif  // MXNET_USE_TENSORRT
+    *out = Executor::SimpleBind(*sym, ctx, ctx_map, in_arg_ctx_vec, arg_grad_ctx_vec,
+                                aux_state_ctx_vec, arg_shape_map, arg_dtype_map, arg_stype_map,
+                                grad_req_type_vec, shared_arg_name_set, &in_arg_vec,
+                                &arg_grad_vec, &aux_state_vec,
+                                use_shared_buffer ? &shared_buffer_map : nullptr,
+                                reinterpret_cast<Executor*>(shared_exec_handle));
+#if MXNET_USE_TENSORRT
+  }
+#endif  // MXNET_USE_TENSORRT
 
   // copy ndarray ptrs to ret->handles so that front end
   // can access them
@@ -509,6 +538,112 @@ int MXExecutorSimpleBind(SymbolHandle symbol_handle,
 
   API_END();
 }
+
+int MXExecutorReshape(int partial_shaping,
+                      int allow_up_sizing,
+                      int dev_type,
+                      int dev_id,
+                      mx_uint num_map_keys,
+                      const char** map_keys,
+                      const int* map_dev_types,
+                      const int* map_dev_ids,
+                      const mx_uint num_provided_arg_shapes,
+                      const char** provided_arg_shape_names,
+                      const mx_uint* provided_arg_shape_data,
+                      const mx_uint* provided_arg_shape_idx,
+                      mx_uint* num_in_args,
+                      NDArrayHandle** in_args,
+                      NDArrayHandle** arg_grads,
+                      mx_uint* num_aux_states,
+                      NDArrayHandle** aux_states,
+                      ExecutorHandle shared_exec,
+                      ExecutorHandle *out) {
+  MXAPIThreadLocalEntry *ret = MXAPIThreadLocalStore::Get();
+  API_BEGIN();
+  // create shape map for in_args and aux_states
+  std::unordered_map<std::string, TShape> kwargs(num_provided_arg_shapes);
+  for (mx_uint i = 0; i < num_provided_arg_shapes; ++i) {
+    auto p = kwargs.emplace(provided_arg_shape_names[i],
+        TShape(provided_arg_shape_data+provided_arg_shape_idx[i],
+          provided_arg_shape_data+provided_arg_shape_idx[i+1]));
+    CHECK(p.second) << "Duplicate shapes are provided for argument "
+      << provided_arg_shape_names[i] << " in reshape of executor";
+  }
+
+  Context ctx = Context::Create(static_cast<Context::DeviceType>(dev_type), dev_id);
+  std::map<std::string, Context> ctx_map;
+  for (mx_uint i = 0; i < num_map_keys; ++i) {
+    ctx_map[std::string(map_keys[i])] = Context::Create(
+        static_cast<Context::DeviceType>(map_dev_types[i]), map_dev_ids[i]);
+  }
+  std::vector<NDArray> in_arg_vec;
+  std::vector<NDArray> arg_grad_vec;
+  std::vector<NDArray> aux_state_vec;
+
+  Executor* exec = static_cast<Executor*>(shared_exec);
+  *out = exec->Reshape(partial_shaping, allow_up_sizing, ctx, ctx_map, kwargs,
+                       &in_arg_vec, &arg_grad_vec, &aux_state_vec);
+
+  ret->ret_handles.clear();
+  ret->ret_handles.reserve(in_arg_vec.size()+arg_grad_vec.size()+aux_state_vec.size());
+
+  size_t nd_idx = 0;
+  for (const auto& nd : in_arg_vec) {
+    if (nd.is_none()) {
+      LOG(FATAL) << "Input argument NDArray cannot be un-allocated";
+    }
+    ret->ret_handles.push_back(new NDArray(nd));
+  }
+  if (in_arg_vec.size() > 0) {
+    *num_in_args = in_arg_vec.size();
+    *in_args = &(ret->ret_handles[nd_idx]);
+    nd_idx = ret->ret_handles.size();
+  }
+
+  for (const auto& nd : arg_grad_vec) {
+    if (nd.is_none()) {
+      ret->ret_handles.push_back(nullptr);
+    } else {
+      ret->ret_handles.push_back(new NDArray(nd));
+    }
+  }
+  if (arg_grad_vec.size() > 0) {
+    *arg_grads = &(ret->ret_handles[nd_idx]);
+    nd_idx = ret->ret_handles.size();
+  }
+
+  for (const auto& nd : aux_state_vec) {
+    if (nd.is_none()) {
+      LOG(FATAL) << "Auxiliary argument NDArray cannot be un-allocated";
+    }
+    ret->ret_handles.push_back(new NDArray(nd));
+  }
+  if (aux_state_vec.size() > 0) {
+    *num_aux_states = aux_state_vec.size();
+    *aux_states = &(ret->ret_handles[nd_idx]);
+    nd_idx = ret->ret_handles.size();
+  }
+  API_END_HANDLE_ERROR(delete out);
+}
+
+int MXExecutorGetOptimizedSymbol(ExecutorHandle handle,
+                                 SymbolHandle *out) {
+  auto s = new nnvm::Symbol();
+  API_BEGIN();
+
+#if MXNET_USE_TENSORRT
+  auto exec = static_cast<exec::TrtGraphExecutor*>(handle);
+  *s = exec->GetOptimizedSymbol();
+  *out = s;
+#else
+  LOG(FATAL) << "GetOptimizedSymbol may only be used when MXNet is compiled with "
+                "MXNET_USE_TENSORRT enabled.  Please re-compile MXNet with TensorRT support.";
+#endif  // MXNET_USE_TENSORRT
+
+  API_END_HANDLE_ERROR(delete s);
+}
+
+
 
 int MXExecutorSetMonitorCallback(ExecutorHandle handle,
                                  ExecutorMonitorCallback callback,

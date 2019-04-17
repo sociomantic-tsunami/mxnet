@@ -36,6 +36,14 @@ We can specify the `stype` of a variable as "csr" or "row_sparse" to hold sparse
 
 ```python
 import mxnet as mx
+import numpy as np
+import random
+
+# set the seeds for repeatability
+random.seed(42)
+np.random.seed(42)
+mx.random.seed(42) 
+
 # Create a variable to hold an NDArray
 a = mx.sym.Variable('a')
 # Create a variable to hold a CSRNDArray
@@ -48,7 +56,7 @@ c = mx.sym.Variable('c', stype='row_sparse')
 
 
 
-    (<Symbol a>, <Symbol b>, <Symbol c>)
+`(<Symbol a>, <Symbol b>, <Symbol c>)` <!--notebook-skip-line-->
 
 
 
@@ -182,7 +190,7 @@ fallback_log = fallback_exec.outputs[1]
 
 
 
-### Inspecting Storage Types of the Symbol Graph (Work in Progress)
+### Inspecting Storage Types of the Symbol Graph
 
 When the environment variable `MXNET_INFER_STORAGE_TYPE_VERBOSE_LOGGING` is set to `1`, MXNet will log the storage type information of
 operators' inputs and outputs in the computation graph. For example, we can inspect the storage types of
@@ -304,8 +312,10 @@ assert metric.get()[1] < 1, "Achieved MSE (%f) is larger than expected (1.0)" % 
 
 
 
-### Training the model with multiple machines
+### Training the model with multiple machines or multiple devices
 
-To train a sparse model with multiple machines, please refer to the example in [mxnet/example/sparse/](https://github.com/apache/incubator-mxnet/tree/master/example/sparse)
+Distributed training with `row_sparse` weights and gradients are supported in MXNet, which significantly reduces communication cost for large models. To train a sparse model with multiple machines, you need to call `prepare` before `forward`, or `save_checkpoint`.
+Please refer to the example in [mxnet/example/sparse/linear_classification](https://github.com/apache/incubator-mxnet/tree/master/example/sparse/linear_classification)
+for more details.
 
 <!-- INSERT SOURCE DOWNLOAD BUTTONS -->

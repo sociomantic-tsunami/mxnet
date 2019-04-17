@@ -19,11 +19,12 @@ import os
 import math
 import itertools
 import mxnet as mx
-from mxnet.test_utils import verify_generator, gen_buckets_probs_with_ppf
+from mxnet.test_utils import verify_generator, gen_buckets_probs_with_ppf, retry
 import numpy as np
 import random as rnd
-from common import setup_module, with_seed, random_seed
+from common import setup_module, with_seed, random_seed, teardown
 import scipy.stats as ss
+import unittest
 
 def same(a, b):
     return np.sum(a != b) == 0
@@ -45,6 +46,25 @@ def check_with_device(device, dtype):
             ]
         },
         {
+            'name': 'normal_like',
+            'symbol': mx.sym.random.normal_like,
+            'ndop': mx.nd.random.normal_like,
+            'params': { 'loc': 10.0, 'scale': 0.5 },
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64) - params['loc']),  tol),
+                ('std',  lambda x, params: np.std(x.astype(np.float64)) - params['scale'], tol)
+            ]
+        },
+        {
+            'name': 'randn',
+            'ndop': mx.nd.random.randn,
+            'params': { 'loc': 10.0, 'scale': 0.5 },
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64) - params['loc']),  tol),
+                ('std',  lambda x, params: np.std(x.astype(np.float64)) - params['scale'], tol)
+            ]
+        },
+        {
             'name': 'uniform',
             'symbol': mx.sym.random.uniform,
             'ndop': mx.nd.random.uniform,
@@ -56,62 +76,122 @@ def check_with_device(device, dtype):
             ]
         },
         {
-                'name': 'gamma',
-                'symbol': mx.sym.random.gamma,
-                'ndop': mx.nd.random.gamma,
-                'params': { 'alpha': 9.0, 'beta': 0.5 },
-                'inputs': [ ('alpha', [ [ 0.0, 2.5 ], [ 9.75, 11.0 ] ]) , ('beta', [ [ 1.0, 0.7 ], [ 0.5, 0.3 ] ]) ],
-                'checks': [
-                    ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['alpha'] * params['beta'], tol),
-                    ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['alpha'] * params['beta'] ** 2), tol)
-                ]
-            },
-            {
-                'name': 'exponential',
-                'symbol': mx.sym.random.exponential,
-                'ndop': mx.nd.random.exponential,
-                'params': { 'scale': 1.0/4.0 },
-                'inputs': [ ('scale', [ [ 1.0/1.0, 1.0/8.5 ], [ 1.0/2.7 , 1.0/0.5 ] ]) ],
-                'checks': [
-                    ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['scale'], tol),
-                    ('std', lambda x, params: np.std(x.astype(np.float64)) - params['scale'], tol)
-                ]
-            },
-            {
-                'name': 'poisson',
-                'symbol': mx.sym.random.poisson,
-                'ndop': mx.nd.random.poisson,
-                'params': { 'lam': 4.0 },
-                'inputs': [ ('lam', [ [ 25.0, 8.5 ], [ 2.7 , 0.5 ] ]) ],
-                'checks': [
-                    ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['lam'], tol),
-                    ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['lam']), tol)
-                ]
-            },
-            {
-                'name': 'neg-binomial',
-                'symbol': mx.sym.random.negative_binomial,
-                'ndop': mx.nd.random.negative_binomial,
-                'params': { 'k': 3, 'p': 0.4 },
-                'inputs': [ ('k', [ [ 3, 4 ], [ 5 , 6 ] ]) , ('p', [ [ 0.4 , 0.77 ], [ 0.5, 0.84 ] ]) ],
-                'checks': [
-                    ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['k'] * (1.0 - params['p']) /  params['p'], tol),
-                    ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['k'] * (1.0 - params['p']))/params['p'], tol)
-                ]
-            },
-            {
-                'name': 'gen-neg-binomial',
-                'symbol': mx.sym.random.generalized_negative_binomial,
-                'ndop': mx.nd.random.generalized_negative_binomial,
-                'params': { 'mu': 2.0, 'alpha': 0.3 },
-                'inputs': [ ('mu', [ [ 2.0, 2.5 ], [ 1.3, 1.9 ] ]) , ('alpha', [ [ 1.0, 0.1 ], [ 0.2, 0.5 ] ]) ],
-                'checks': [
-                    ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['mu'], tol),
-                    ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['mu'] + params['alpha'] * params['mu'] ** 2 ), tol)
-                ]
-            }
+            'name': 'uniform_like',
+            'symbol': mx.sym.random.uniform_like,
+            'ndop': mx.nd.random.uniform_like,
+            'params': { 'low': -1.5, 'high': 3.0 },
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - (params['low'] + params['high']) / 2.0, tol),
+                ('std', lambda x,  params: np.std(x.astype(np.float64)) - np.sqrt(1.0 / 12.0) * (params['high'] - params['low']), tol)
+            ]
+        },
+        {
+            'name': 'gamma',
+            'symbol': mx.sym.random.gamma,
+            'ndop': mx.nd.random.gamma,
+            'params': { 'alpha': 9.0, 'beta': 0.5 },
+            'inputs': [ ('alpha', [ [ 0.0, 2.5 ], [ 9.75, 11.0 ] ]) , ('beta', [ [ 1.0, 0.7 ], [ 0.5, 0.3 ] ]) ],
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['alpha'] * params['beta'], tol),
+                ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['alpha'] * params['beta'] ** 2), tol)
+            ]
+        },
+        {
+            'name': 'gamma_like',
+            'symbol': mx.sym.random.gamma_like,
+            'ndop': mx.nd.random.gamma_like,
+            'params': { 'alpha': 9.0, 'beta': 0.5 },
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['alpha'] * params['beta'], tol),
+                ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['alpha'] * params['beta'] ** 2), tol)
+            ]
+        },
+        {
+            'name': 'exponential',
+            'symbol': mx.sym.random.exponential,
+            'ndop': mx.nd.random.exponential,
+            'params': { 'scale': 1.0/4.0 },
+            'inputs': [ ('scale', [ [ 1.0/1.0, 1.0/8.5 ], [ 1.0/2.7 , 1.0/0.5 ] ]) ],
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['scale'], tol),
+                ('std', lambda x, params: np.std(x.astype(np.float64)) - params['scale'], tol)
+            ]
+        },
+        {
+            'name': 'exponential_like',
+            'symbol': mx.sym.random.exponential_like,
+            'ndop': mx.nd.random.exponential_like,
+            'params': { 'lam': 4.0 },
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - 1.0/params['lam'], tol),
+                ('std', lambda x, params: np.std(x.astype(np.float64)) - 1.0/params['lam'], tol)
+            ]
+        },
+        {
+            'name': 'poisson',
+            'symbol': mx.sym.random.poisson,
+            'ndop': mx.nd.random.poisson,
+            'params': { 'lam': 4.0 },
+            'inputs': [ ('lam', [ [ 25.0, 8.5 ], [ 2.7 , 0.5 ] ]) ],
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['lam'], tol),
+                ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['lam']), tol)
+            ]
+        },
+        {
+            'name': 'poisson_like',
+            'symbol': mx.sym.random.poisson_like,
+            'ndop': mx.nd.random.poisson_like,
+            'params': { 'lam': 4.0 },
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['lam'], tol),
+                ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['lam']), tol)
+            ]
+        },
+        {
+            'name': 'neg_binomial',
+            'symbol': mx.sym.random.negative_binomial,
+            'ndop': mx.nd.random.negative_binomial,
+            'params': { 'k': 3, 'p': 0.4 },
+            'inputs': [ ('k', [ [ 3, 4 ], [ 5 , 6 ] ]) , ('p', [ [ 0.4 , 0.77 ], [ 0.5, 0.84 ] ]) ],
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['k'] * (1.0 - params['p']) /  params['p'], tol),
+                ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['k'] * (1.0 - params['p']))/params['p'], tol)
+            ]
+        },
+        {
+            'name': 'neg_binomial_like',
+            'symbol': mx.sym.random.negative_binomial_like,
+            'ndop': mx.nd.random.negative_binomial_like,
+            'params': { 'k': 3, 'p': 0.4 },
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['k'] * (1.0 - params['p']) /  params['p'], tol),
+                ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['k'] * (1.0 - params['p']))/params['p'], tol)
+            ]
+        },
+        {
+            'name': 'gen_neg_binomial',
+            'symbol': mx.sym.random.generalized_negative_binomial,
+            'ndop': mx.nd.random.generalized_negative_binomial,
+            'params': { 'mu': 2.0, 'alpha': 0.3 },
+            'inputs': [ ('mu', [ [ 2.0, 2.5 ], [ 1.3, 1.9 ] ]) , ('alpha', [ [ 1.0, 0.1 ], [ 0.2, 0.5 ] ]) ],
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['mu'], tol),
+                ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['mu'] + params['alpha'] * params['mu'] ** 2 ), tol)
+            ]
+        },
+        {
+            'name': 'gen_neg_binomial_like',
+            'symbol': mx.sym.random.generalized_negative_binomial_like,
+            'ndop': mx.nd.random.generalized_negative_binomial_like,
+            'params': { 'mu': 2.0, 'alpha': 0.3 },
+            'checks': [
+                ('mean', lambda x, params: np.mean(x.astype(np.float64)) - params['mu'], tol),
+                ('std', lambda x, params: np.std(x.astype(np.float64)) - np.sqrt(params['mu'] + params['alpha'] * params['mu'] ** 2 ), tol)
+            ]
+        },
 
-        ]
+    ]
 
     # Create enough samples such that we get a meaningful distribution.
     shape = (500, 500)
@@ -122,10 +202,18 @@ def check_with_device(device, dtype):
         # check directly
         params = symbdic['params'].copy()
         params.update(shape=shape, dtype=dtype, ctx=device)
+        args = ()
+        if name == 'randn':
+            params.pop('shape')  # randn does not accept shape param
+            args = shape
+        if name.endswith('_like'):
+            params['data'] = mx.nd.ones(params.pop('shape'),
+                                        dtype=params.pop('dtype'),
+                                        ctx=params.pop('ctx'))
         mx.random.seed(128)
-        ret1 = ndop(**params).asnumpy()
+        ret1 = ndop(*args, **params).asnumpy()
         mx.random.seed(128)
-        ret2 = ndop(**params).asnumpy()
+        ret2 = ndop(*args, **params).asnumpy()
         assert same(ret1, ret2), \
                 "ndarray test: `%s` should give the same result with the same seed" % name
 
@@ -133,12 +221,14 @@ def check_with_device(device, dtype):
             assert np.abs(check_func(ret1, params)) < tol, "ndarray test: %s check for `%s` did not pass" % (check_name, name)
 
         # check multi-distribution sampling
+        if 'inputs' not in symbdic: continue  # randn does not support multi-distribution sampling
+
         params = {'shape': shape, 'dtype': dtype, 'ctx': device}
         params.update({k : mx.nd.array(v, ctx=device, dtype=dtype) for k, v in symbdic['inputs']})
         mx.random.seed(128)
-        ret1 = ndop(**params).asnumpy()
+        ret1 = ndop(*args, **params).asnumpy()
         mx.random.seed(128)
-        ret2 = ndop(**params).asnumpy()
+        ret2 = ndop(*args, **params).asnumpy()
         assert same(ret1, ret2), \
                 "ndarray test: `%s` should give the same result with the same seed" % name
         for i in range(2):
@@ -148,11 +238,15 @@ def check_with_device(device, dtype):
                     err = np.abs(check_func(ret2[i,j], stats))
                     assert err < tol, "%f vs %f: symbolic test: %s check for `%s` did not pass" % (err, tol, check_name, name)
 
+        if 'symbol' not in symbdic: continue  # randn does not have symbol
+
         # check symbolic
         symbol = symbdic['symbol']
         X = mx.sym.Variable("X")
         params = symbdic['params'].copy()
         params.update(shape=shape, dtype=dtype)
+        if name.endswith('_like'):
+            params['data'] = mx.sym.ones(params.pop('shape'))
         Y = symbol(**params) + X
         x = mx.nd.zeros(shape, dtype=dtype, ctx=device)
         xgrad = mx.nd.zeros(shape, dtype=dtype, ctx=device)
@@ -171,6 +265,7 @@ def check_with_device(device, dtype):
         ret1 = un1.asnumpy()
         for check_name, check_func, tol in symbdic['checks']:
             assert np.abs(check_func(ret1, params)) < tol, "symbolic test: %s check for `%s` did not pass" % (check_name, name)
+        if name.endswith('_like'): continue
 
         # check multi-distribution sampling
         symbol = symbdic['symbol']
@@ -293,31 +388,22 @@ def test_random_seed_setting_for_context():
         samples_imp = []
         samples_sym = []
         # Collect random number samples from the generators of all devices, each seeded with the same number.
-        for dev_id in range(0, 16 if dev_type == 'gpu' else 1):
-            # Currently python API does not provide a method to get the number of gpu devices.
-            # Waiting for PR #10354, which provides the method, to be merged.
-            # As a temporal workaround, try first and catch the exception caused by the absence of the device with `dev_id`.
-            try:
-                with mx.Context(dev_type, dev_id):
-                    ctx = mx.context.current_context()
-                    seed = set_seed_variously_for_context(ctx, 1, num_temp_seeds, seed_to_test)
+        for dev_id in range(0, mx.context.num_gpus() if dev_type == 'gpu' else 1):
+            with mx.Context(dev_type, dev_id):
+                ctx = mx.context.current_context()
+                seed = set_seed_variously_for_context(ctx, 1, num_temp_seeds, seed_to_test)
 
-                    # Check imperative. `multinomial` uses non-parallel rng.
-                    rnds = mx.nd.random.multinomial(data=mx.nd.array(probs, dtype=dtype), shape=num_samples)
-                    samples_imp.append(rnds.asnumpy())
+                # Check imperative. `multinomial` uses non-parallel rng.
+                rnds = mx.nd.random.multinomial(data=mx.nd.array(probs, dtype=dtype), shape=num_samples)
+                samples_imp.append(rnds.asnumpy())
 
-                    # Check symbolic. `multinomial` uses non-parallel rng.
-                    P = mx.sym.Variable("P")
-                    X = mx.sym.random.multinomial(data=P, shape=num_samples, get_prob=False)
-                    exe = X.bind(ctx, {"P": mx.nd.array(probs, dtype=dtype)})
-                    set_seed_variously_for_context(ctx, seed, num_temp_seeds, seed_to_test)
-                    exe.forward()
-                    samples_sym.append(exe.outputs[0].asnumpy())
-            except mx.MXNetError as e:
-                if str(e).find("invalid device ordinal") != -1:
-                    break
-                else:
-                    raise e
+                # Check symbolic. `multinomial` uses non-parallel rng.
+                P = mx.sym.Variable("P")
+                X = mx.sym.random.multinomial(data=P, shape=num_samples, get_prob=False)
+                exe = X.bind(ctx, {"P": mx.nd.array(probs, dtype=dtype)})
+                set_seed_variously_for_context(ctx, seed, num_temp_seeds, seed_to_test)
+                exe.forward()
+                samples_sym.append(exe.outputs[0].asnumpy())
         # The samples should be identical across different gpu devices.
         for i in range(1, len(samples_imp)):
             assert same(samples_imp[i - 1], samples_imp[i])
@@ -333,78 +419,81 @@ def test_parallel_random_seed_setting_for_context():
         samples_imp = []
         samples_sym = []
         # Collect random number samples from the generators of all devices, each seeded with the same number.
-        for dev_id in range(0, 16 if dev_type == 'gpu' else 1):
-            # Currently python API does not provide a method to get the number of gpu devices.
-            # Waiting for PR #10354, which provides the method, to be merged.
-            # As a temporal workaround, try first and catch the exception caused by the absence of the device with `dev_id`.
-            try:
-                with mx.Context(dev_type, dev_id):
-                    ctx = mx.context.current_context()
-                    # Avoid excessive test cpu runtimes.
-                    num_temp_seeds = 25 if dev_type == 'gpu' else 1
-                    # To flush out a possible race condition, run multiple times.
-                    for _ in range(20):
-                        # Create enough samples such that we get a meaningful distribution.
-                        shape = (200, 200)
-                        params = { 'low': -1.5, 'high': 3.0 }
-                        params.update(shape=shape, dtype=dtype)
+        for dev_id in range(0, mx.context.num_gpus() if dev_type == 'gpu' else 1):
+            with mx.Context(dev_type, dev_id):
+                ctx = mx.context.current_context()
+                # Avoid excessive test cpu runtimes.
+                num_temp_seeds = 25 if dev_type == 'gpu' else 1
+                # To flush out a possible race condition, run multiple times.
+                for _ in range(20):
+                    # Create enough samples such that we get a meaningful distribution.
+                    shape = (200, 200)
+                    params = { 'low': -1.5, 'high': 3.0 }
+                    params.update(shape=shape, dtype=dtype)
 
-                        # Check imperative. `uniform` uses parallel rng.
-                        seed = set_seed_variously_for_context(ctx, 1, num_temp_seeds, seed_to_test)
-                        rnds = mx.nd.random.uniform(**params)
-                        samples_imp.append(rnds.asnumpy())
+                    # Check imperative. `uniform` uses parallel rng.
+                    seed = set_seed_variously_for_context(ctx, 1, num_temp_seeds, seed_to_test)
+                    rnds = mx.nd.random.uniform(**params)
+                    samples_imp.append(rnds.asnumpy())
 
-                        # Check symbolic. `uniform` uses parallel rng.
-                        X = mx.sym.Variable("X")
-                        Y = mx.sym.random.uniform(**params) + X
-                        x = mx.nd.zeros(shape, dtype=dtype)
-                        xgrad = mx.nd.zeros(shape, dtype=dtype)
-                        yexec = Y.bind(ctx, {'X' : x}, {'X': xgrad})
-                        set_seed_variously_for_context(ctx, seed, num_temp_seeds, seed_to_test)
-                        yexec.forward(is_train=True)
-                        yexec.backward(yexec.outputs[0])
-                        samples_sym.append(yexec.outputs[0].asnumpy())
-            except mx.MXNetError as e:
-                if str(e).find("invalid device ordinal") != -1:
-                    break
-                else:
-                    raise e
+                    # Check symbolic. `uniform` uses parallel rng.
+                    X = mx.sym.Variable("X")
+                    Y = mx.sym.random.uniform(**params) + X
+                    x = mx.nd.zeros(shape, dtype=dtype)
+                    xgrad = mx.nd.zeros(shape, dtype=dtype)
+                    yexec = Y.bind(ctx, {'X' : x}, {'X': xgrad})
+                    set_seed_variously_for_context(ctx, seed, num_temp_seeds, seed_to_test)
+                    yexec.forward(is_train=True)
+                    yexec.backward(yexec.outputs[0])
+                    samples_sym.append(yexec.outputs[0].asnumpy())
         # The samples should be identical across different gpu devices.
         for i in range(1, len(samples_imp)):
             assert same(samples_imp[i - 1], samples_imp[i])
         for i in range(1, len(samples_sym)):
             assert same(samples_sym[i - 1], samples_sym[i])
 
+@retry(5)
 @with_seed()
 def test_sample_multinomial():
-    for x in [mx.nd.array([[0,1,2,3,4],[4,3,2,1,0]])/10.0, mx.nd.array([0,1,2,3,4])/10.0]:
-        dx = mx.nd.ones_like(x)
-        mx.contrib.autograd.mark_variables([x], [dx])
-        # Adding rtol and increasing samples needed to pass with seed 2951820647
-        samples = 5000
-        with mx.autograd.record():
-            y, prob = mx.nd.random.multinomial(x, shape=samples, get_prob=True)
-            r = prob * 5
-            r.backward()
+    for dtype in ['uint8', 'int32', 'float16', 'float32', 'float64']: # output array types
+        for x in [mx.nd.array([[0,1,2,3,4],[4,3,2,1,0]])/10.0, mx.nd.array([0,1,2,3,4])/10.0]:
+            dx = mx.nd.ones_like(x)
+            mx.contrib.autograd.mark_variables([x], [dx])
+            # Adding rtol and increasing samples needed to pass with seed 2951820647
+            samples = 10000
+            with mx.autograd.record():
+                y, prob = mx.nd.random.multinomial(x, shape=samples, get_prob=True, dtype=dtype)
+                r = prob * 5
+                r.backward()
 
-        y = y.asnumpy()
-        x = x.asnumpy()
-        dx = dx.asnumpy()
-        if len(x.shape) is 1:
-            x = x.reshape((1, x.shape[0]))
-            dx = dx.reshape(1, dx.shape[0])
-            y = y.reshape((1, y.shape[0]))
-            prob = prob.reshape((1, prob.shape[0]))
-        for i in range(x.shape[0]):
-            freq = np.bincount(y[i,:], minlength=5)/np.float32(samples)*x[i,:].sum()
-            mx.test_utils.assert_almost_equal(freq, x[i], rtol=0.20)
-            rprob = x[i][y[i]]/x[i].sum()
-            mx.test_utils.assert_almost_equal(np.log(rprob), prob.asnumpy()[i], atol=1e-5)
+            assert(np.dtype(dtype) == y.dtype)
+            y = y.asnumpy()
+            x = x.asnumpy()
+            dx = dx.asnumpy()
+            if len(x.shape) is 1:
+                x = x.reshape((1, x.shape[0]))
+                dx = dx.reshape(1, dx.shape[0])
+                y = y.reshape((1, y.shape[0]))
+                prob = prob.reshape((1, prob.shape[0]))
+            for i in range(x.shape[0]):
+                freq = np.bincount(y[i,:].astype('int32'), minlength=5)/np.float32(samples)*x[i,:].sum()
+                mx.test_utils.assert_almost_equal(freq, x[i], rtol=0.20, atol=1e-1)
+                rprob = x[i][y[i].astype('int32')]/x[i].sum()
+                mx.test_utils.assert_almost_equal(np.log(rprob), prob.asnumpy()[i], atol=1e-5)
 
-            real_dx = np.zeros((5,))
-            for j in range(samples):
-                real_dx[y[i][j]] += 5.0 / rprob[j]
-            mx.test_utils.assert_almost_equal(real_dx, dx[i, :], rtol=1e-4, atol=1e-5)
+                real_dx = np.zeros((5,))
+                for j in range(samples):
+                    real_dx[int(y[i][j])] += 5.0 / rprob[j]
+                mx.test_utils.assert_almost_equal(real_dx, dx[i, :], rtol=1e-4, atol=1e-5)
+    for dtype in ['uint8', 'float16', 'float32']:
+        # Bound check for the output data types. 'int32' and 'float64' require large memory so are skipped.
+        x = mx.nd.zeros(2 ** 25)  # Larger than the max integer in float32 without precision loss.
+        bound_check = False
+        try:
+            y = mx.nd.random.multinomial(x, dtype=dtype)
+        except mx.MXNetError as e:
+            bound_check = True
+        assert bound_check
 
 # Test the generators with the chi-square testing
 @with_seed()
@@ -453,18 +542,19 @@ def test_uniform_generator():
 
 @with_seed()
 def test_gamma_generator():
+    success_rate = 0.05
     ctx = mx.context.current_context()
     for dtype in ['float16', 'float32', 'float64']:
         for kappa, theta in [(0.5, 1.0), (1.0, 5.0)]:
             print("ctx=%s, dtype=%s, Shape=%g, Scale=%g:" % (ctx, dtype, kappa, theta))
             buckets, probs = gen_buckets_probs_with_ppf(lambda x: ss.gamma.ppf(x, a=kappa, loc=0, scale=theta), 5)
             generator_mx = lambda x: mx.nd.random.gamma(kappa, theta, shape=x, ctx=ctx, dtype=dtype).asnumpy()
-            verify_generator(generator=generator_mx, buckets=buckets, probs=probs)
+            verify_generator(generator=generator_mx, buckets=buckets, probs=probs, success_rate=success_rate)
             generator_mx_same_seed = \
                 lambda x: np.concatenate(
                     [mx.nd.random.gamma(kappa, theta, shape=x // 10, ctx=ctx, dtype=dtype).asnumpy()
                      for _ in range(10)])
-            verify_generator(generator=generator_mx_same_seed, buckets=buckets, probs=probs)
+            verify_generator(generator=generator_mx_same_seed, buckets=buckets, probs=probs, success_rate=success_rate)
 
 @with_seed()
 def test_exponential_generator():
@@ -628,6 +718,23 @@ def test_with_random_seed():
     for i in range(0, num_seeds-1):
         for j in range(i+1, num_seeds):
             check_data(data[i],data[j])
+
+@with_seed()
+def test_unique_zipfian_generator():
+    ctx = mx.context.current_context()
+    if ctx.device_type == 'cpu':
+        num_sampled = 8192
+        range_max = 793472
+        batch_size = 4
+        op = mx.nd._internal._sample_unique_zipfian
+        classes, num_trials = op(range_max, shape=(batch_size, num_sampled))
+        for i in range(batch_size):
+            num_trial = num_trials[i].asscalar()
+            # test uniqueness
+            assert np.unique(classes[i].asnumpy()).size == num_sampled
+            # test num trials. reference count obtained from pytorch implementation
+            assert num_trial > 14500
+            assert num_trial < 17000
 
 @with_seed()
 def test_zipfian_generator():

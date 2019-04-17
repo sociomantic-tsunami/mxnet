@@ -1,3 +1,4 @@
+# coding: utf-8
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -15,15 +16,15 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# coding: utf-8
 # pylint: disable=too-many-lines
 """Weight updating functions."""
+import logging
 import math
 import pickle
 import warnings
 import numpy
 from .base import py_str
-from .ndarray import (NDArray, zeros, clip, sqrt, cast, maximum, abs as NDabs)
+from .ndarray import (NDArray, zeros, clip, sqrt, cast, maximum, abs as NDabs, array, multiply)
 from .ndarray import (sgd_update, sgd_mom_update, adam_update, rmsprop_update, rmspropalex_update,
                       mp_sgd_update, mp_sgd_mom_update, square, ftrl_update, ftml_update,
                       signsgd_update, signum_update)
@@ -425,6 +426,17 @@ class Optimizer(object):
             wd *= self.wd_mult.get(self.idx2name[index], 1.0)
         return wd
 
+    def __getstate__(self):
+        ret = self.__dict__.copy()
+        # do not include param_dict in the state
+        del ret['param_dict']
+        return ret
+
+    def __setstate__(self, state):
+        self.__dict__ = state
+        # param_dict needs to be explicitly set by the trainer
+        self.param_dict = {}
+
 # convenience wrapper for Optimizer.Register
 register = Optimizer.register   # pylint: disable=invalid-name
 
@@ -433,11 +445,11 @@ register = Optimizer.register   # pylint: disable=invalid-name
 class SGD(Optimizer):
     """The SGD optimizer with momentum and weight decay.
 
-    If the storage types of weight and grad are both ``row_sparse``, and ``lazy_update`` is True, \
+    If the storage types of grad is ``row_sparse`` and ``lazy_update`` is True, \
     **lazy updates** are applied by::
 
         for row in grad.indices:
-            rescaled_grad[row] = lr * rescale_grad * clip(grad[row], clip_gradient) + wd * weight[row]
+            rescaled_grad[row] = lr * (rescale_grad * clip(grad[row], clip_gradient) + wd * weight[row])
             state[row] = momentum[row] * state[row] + rescaled_grad[row]
             weight[row] = weight[row] - state[row]
 
@@ -450,7 +462,7 @@ class SGD(Optimizer):
 
     Otherwise, **standard updates** are applied by::
 
-        rescaled_grad = lr * rescale_grad * clip(grad, clip_gradient) + wd * weight
+        rescaled_grad = lr * (rescale_grad * clip(grad, clip_gradient) + wd * weight)
         state = momentum * state + rescaled_grad
         weight = weight - state
 
@@ -493,8 +505,8 @@ class SGD(Optimizer):
 
     def create_state(self, index, weight):
         momentum = None
-        stype = weight.stype if self.lazy_update else 'default'
         if self.momentum != 0.0:
+            stype = weight.stype if self.lazy_update else 'default'
             momentum = zeros(weight.shape, weight.context, dtype=weight.dtype, stype=stype)
         return momentum
 
@@ -514,9 +526,9 @@ class SGD(Optimizer):
         if not multi_precision:
             if state is not None:
                 sgd_mom_update(weight, grad, state, out=weight,
-                               lr=lr, wd=wd, **kwargs)
+                               lazy_update=self.lazy_update, lr=lr, wd=wd, **kwargs)
             else:
-                sgd_update(weight, grad, out=weight,
+                sgd_update(weight, grad, out=weight, lazy_update=self.lazy_update,
                            lr=lr, wd=wd, **kwargs)
         else:
             if state[0] is not None:
@@ -536,15 +548,19 @@ class SGD(Optimizer):
 
 @register
 class Signum(Optimizer):
-    """The Signum optimizer that takes the sign of gradient or momentum.
+    r"""The Signum optimizer that takes the sign of gradient or momentum.
 
-    The optimizer updates the weight by:
+    The optimizer updates the weight by::
 
         rescaled_grad = rescale_grad * clip(grad, clip_gradient) + wd * weight
         state = momentum * state + (1-momentum)*rescaled_grad
         weight = (1 - lr * wd_lh) * weight - lr * sign(state)
 
-    See the original paper at: https://jeremybernste.in/projects/amazon/signum.pdf
+    Reference:
+    Jeremy Bernstein, Yu-Xiang Wang, Kamyar Azizzadenesheli & Anima Anandkumar. (2018).
+    signSGD: Compressed Optimisation for Non-Convex Problems. In ICML'18.
+
+    See: https://arxiv.org/abs/1802.04434
 
     For details of the update algorithm see
     :class:`~mxnet.ndarray.signsgd_update` and :class:`~mxnet.ndarray.signum_update`.
@@ -603,6 +619,14 @@ class FTML(Optimizer):
     This class implements the optimizer described in
     *FTML - Follow the Moving Leader in Deep Learning*,
     available at http://proceedings.mlr.press/v70/zheng17a/zheng17a.pdf.
+
+    Denote time step by t. The optimizer updates the weight by::
+
+        rescaled_grad = clip(grad * rescale_grad + wd * weight, clip_gradient)
+        v = beta2 * v + (1 - beta2) * square(rescaled_grad)
+        d_t = (1 - power(beta1, t)) / lr * square_root(v / (1 - power(beta2, t))) + epsilon)
+        z = beta1 * z + (1 - beta1) * rescaled_grad - (d_t - beta1 * d_(t-1)) * weight
+        weight = - z / d_t
 
     This optimizer accepts the following parameters in addition to those accepted
     by :class:`.Optimizer`.
@@ -985,7 +1009,7 @@ class Adam(Optimizer):
     This class implements the optimizer described in *Adam: A Method for
     Stochastic Optimization*, available at http://arxiv.org/abs/1412.6980.
 
-    If the storage types of weight and grad are both ``row_sparse``, and ``lazy_update`` is True, \
+    If the storage types of grad is ``row_sparse``, and ``lazy_update`` is True, \
     **lazy updates** are applied by::
 
         for row in grad.indices:
@@ -1058,7 +1082,7 @@ class Adam(Optimizer):
 
         mean, var = state
         adam_update(weight, grad, mean, var, out=weight,
-                    lr=lr, wd=wd, **kwargs)
+                    lazy_update=self.lazy_update, lr=lr, wd=wd, **kwargs)
 
 @register
 class AdaGrad(Optimizer):
@@ -1067,6 +1091,13 @@ class AdaGrad(Optimizer):
     This class implements the AdaGrad optimizer described in *Adaptive Subgradient
     Methods for Online Learning and Stochastic Optimization*, and available at
     http://www.jmlr.org/papers/volume12/duchi11a/duchi11a.pdf.
+
+    This optimizer updates each weight by::
+
+        grad = clip(grad * rescale_grad, clip_gradient)
+        history += square(grad)
+        div = grad / sqrt(history + float_stable_eps)
+        weight += (div + weight * wd) * -lr
 
     This optimizer accepts the following parameters in addition to those accepted
     by :class:`.Optimizer`.
@@ -1078,7 +1109,7 @@ class AdaGrad(Optimizer):
     Parameters
     ----------
     eps: float, optional
-        Small value to avoid division by 0.
+        Initial value of the history accumulator. Avoids division by 0.
 
     """
     def __init__(self, eps=1e-7, **kwargs):
@@ -1095,7 +1126,7 @@ class AdaGrad(Optimizer):
         lr = self._get_lr(index)
         wd = self._get_wd(index)
 
-        is_sparse = weight.stype == 'row_sparse' and grad.stype == 'row_sparse'
+        is_sparse = grad.stype == 'row_sparse'
         history = state
 
         if is_sparse:
@@ -1194,6 +1225,14 @@ class AdaDelta(Optimizer):
 
     This class implements AdaDelta, an optimizer described in  *ADADELTA: An adaptive
     learning rate method*, available at https://arxiv.org/abs/1212.5701.
+
+    This optimizer updates each weight by::
+
+        grad = clip(grad * rescale_grad + wd * weight, clip_gradient)
+        acc_grad = rho * acc_grad + (1. - rho) * grad * grad
+        delta = sqrt(acc_delta + epsilon) / sqrt(acc_grad + epsilon) * grad
+        acc_delta = rho * acc_delta + (1. - rho) * delta * delta
+        weight -= (delta + wd * weight)
 
     This optimizer accepts the following parameters in addition to those accepted
     by :class:`.Optimizer`.
@@ -1320,6 +1359,13 @@ class Adamax(Optimizer):
 
     It is a variant of Adam based on the infinity norm
     available at http://arxiv.org/abs/1412.6980 Section 7.
+
+    The optimizer updates the weight by::
+
+        grad = clip(grad * rescale_grad + wd * weight, clip_gradient)
+        m = beta1 * m_t + (1 - beta1) * grad
+        u = maximum(beta2 * u, abs(grad))
+        weight -= lr / (1 - beta1**t) * m / u
 
     This optimizer accepts the following parameters in addition to those accepted
     by :class:`.Optimizer`.

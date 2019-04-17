@@ -19,12 +19,12 @@ package org.apache.mxnet
 
 import org.apache.mxnet.Base._
 import org.apache.mxnet.DType.DType
-import org.apache.mxnet.io.{MXDataPack, MXDataIter}
+import org.apache.mxnet.io.{MXDataIter, MXDataPack}
 import org.slf4j.LoggerFactory
 
+import scala.annotation.varargs
 import scala.collection.immutable.ListMap
 import scala.collection.mutable.ListBuffer
-
 /**
  * IO iterators for loading training & validation data
  */
@@ -109,18 +109,22 @@ object IO {
   }
 
   // Convert data into canonical form.
-  private[mxnet] def initData(data: IndexedSeq[NDArray],
-                              allowEmpty: Boolean,
-                              defaultName: String): IndexedSeq[(String, NDArray)] = {
+  private[mxnet] def initDataDesc(data: IndexedSeq[NDArray],
+                                  allowEmpty: Boolean,
+                                  defaultName: String,
+                                  defaultDType: DType,
+                                  defaultLayout: String): IndexedSeq[(DataDesc, NDArray)] = {
     require(data != null)
     require(data != IndexedSeq.empty || allowEmpty)
     if (data == IndexedSeq.empty) {
       IndexedSeq()
     } else if (data.length == 1) {
-      IndexedSeq((defaultName, data(0)))
+      IndexedSeq((new DataDesc(defaultName, data(0).shape,
+        defaultDType, defaultLayout), data(0)))
     } else {
       data.zipWithIndex.map(item => {
-        (defaultName + "_" + item._2, item._1)
+        (new DataDesc(defaultName + "_" + item._2, item._1.shape,
+          defaultDType, defaultLayout), item._1)
       }).toIndexedSeq
     }
   }
@@ -135,11 +139,28 @@ class DataBatch(val data: IndexedSeq[NDArray],
                 val pad: Int,
                 // the key for the bucket that should be used for this batch,
                 // for bucketing io only
-                val bucketKey: AnyRef = null,
-                // use ListMap to indicate the order of data/label loading
+                val bucketKey: AnyRef,
+                // use DataDesc to indicate the order of data/label loading
                 // (must match the order of input data/label)
-                private val providedData: ListMap[String, Shape] = null,
-                private val providedLabel: ListMap[String, Shape] = null) {
+                private val providedDataDesc: IndexedSeq[DataDesc],
+                private val providedLabelDesc: IndexedSeq[DataDesc]) {
+  // TODO: change the data/label type into IndexedSeq[(NDArray, DataDesc)]
+  // However, since the data and label can be accessed publicly (no getter and setter)
+  // the change on this will break BC
+  def this(data: IndexedSeq[NDArray],
+            label: IndexedSeq[NDArray],
+            index: IndexedSeq[Long],
+            pad: Int,
+            // the key for the bucket that should be used for this batch,
+            // for bucketing io only
+            bucketKey: AnyRef = null,
+            // use ListMap to indicate the order of data/label loading
+            // (must match the order of input data/label)
+            providedData: ListMap[String, Shape] = null,
+            providedLabel: ListMap[String, Shape] = null) {
+    this(data, label, index, pad, bucketKey,
+      DataDesc.ListMap2Descs(providedData), DataDesc.ListMap2Descs(providedLabel))
+  }
   /**
    * Dispose its data and labels
    * The object shall never be used after it is disposed.
@@ -154,10 +175,121 @@ class DataBatch(val data: IndexedSeq[NDArray],
   }
 
   // The name and shape of data
-  def provideData: ListMap[String, Shape] = providedData
+  def provideData: ListMap[String, Shape] = {
+    var temp = ListMap[String, Shape]()
+    if (providedDataDesc == null) null
+    else {
+      providedDataDesc.foreach(ele => temp = temp + (ele.name -> ele.shape))
+      temp
+    }
+  }
 
   // The name and shape of label
-  def provideLabel: ListMap[String, Shape] = providedLabel
+  def provideLabel: ListMap[String, Shape] = {
+    var temp = ListMap[String, Shape]()
+    if (providedLabelDesc == null) null
+    else {
+      providedLabelDesc.foreach(ele => temp = temp + (ele.name -> ele.shape))
+      temp
+    }
+  }
+
+  def provideDataDesc: IndexedSeq[DataDesc] = providedDataDesc
+
+  def provideLabelDesc: IndexedSeq[DataDesc] = providedLabelDesc
+
+}
+
+object DataBatch {
+  /**
+   * Builder class for DataBatch.
+   */
+  class Builder() {
+    private var data: IndexedSeq[NDArray] = null
+    private var label: IndexedSeq[NDArray] = null
+    private var index: IndexedSeq[Long] = null
+    private var pad: Int = 0
+    private var bucketKey: AnyRef = null
+    private var dataDesc: IndexedSeq[DataDesc] = null
+    private var labelDesc: IndexedSeq[DataDesc] = null
+
+    /**
+     * Set the input data.
+     * @param data a list of data.
+     * @return this.
+     */
+    @varargs def setData(data: NDArray*): Builder = {
+      this.data = data.toIndexedSeq
+      this
+    }
+
+    /**
+     * Set the labels in the same order of data.
+     * @param label a list of labels.
+     * @return this.
+     */
+    @varargs def setLabel(label: NDArray*): Builder = {
+      this.label = label.toIndexedSeq
+      this
+    }
+
+    /**
+     * Set the example indices in this batch.
+     * @param index indices in the same order of data.
+     * @return this.
+     */
+    @varargs def setIndex(index: Long*): Builder = {
+      this.index = index.toIndexedSeq
+      this
+    }
+
+    /**
+     * Set the pad.
+     * @param pad The number of examples padded at the end of a batch. It is used when the
+     *            total number of examples read is not divisible by the `batch_size`.
+     *            These extra padded examples are ignored in prediction.
+     * @return this
+     */
+    def setPad(pad: Int): Builder = {
+      this.pad = pad
+      this
+    }
+
+    /**
+     * Set the bucket key, used for bucketing module.
+     * @param bucketKey the bucket key related to this batch.
+     * @return this.
+     */
+    def setBucketKey(bucketKey: AnyRef): Builder = {
+      this.bucketKey = bucketKey
+      this
+    }
+
+    /**
+     * Provide the shape of a data.
+     * @param dataDesc DataDescriptor
+     * @return this.
+     */
+    def provideDataDesc(dataDesc: IndexedSeq[DataDesc]): Builder = {
+      this.dataDesc = dataDesc
+      this
+    }
+
+    /**
+     * Provide the shape of a label.
+     * @param labelDesc LabelDescriptor
+     * @return this.
+     */
+    def provideLabelDesc(labelDesc: IndexedSeq[DataDesc]): Builder = {
+      this.labelDesc = labelDesc
+      this
+    }
+
+    def build(): DataBatch = {
+      require(data != null, "data is required.")
+      new DataBatch(data, label, index, pad, bucketKey, dataDesc, labelDesc)
+    }
+  }
 }
 
 /**
@@ -177,7 +309,8 @@ abstract class DataIter extends Iterator[DataBatch] {
    */
   @throws(classOf[NoSuchElementException])
   def next(): DataBatch = {
-    new DataBatch(getData(), getLabel(), getIndex(), getPad())
+    new DataBatch(getData(), getLabel(), getIndex(), getPad(),
+      null, null, null)
   }
 
   /**
@@ -206,10 +339,18 @@ abstract class DataIter extends Iterator[DataBatch] {
   def getIndex(): IndexedSeq[Long]
 
   // The name and shape of data provided by this iterator
+  @deprecated
   def provideData: ListMap[String, Shape]
 
   // The name and shape of label provided by this iterator
+  @deprecated
   def provideLabel: ListMap[String, Shape]
+
+  // Provide type:DataDesc of the data
+  def provideDataDesc: IndexedSeq[DataDesc]
+
+  // Provide type:DataDesc of the label
+  def provideLabelDesc: IndexedSeq[DataDesc]
 
   // For bucketing io only
   // The bucket key for the default symbol.
@@ -229,8 +370,9 @@ abstract class DataPack() extends Iterable[DataBatch] {
 
 // Named data desc description contains name, shape, type and other extended attributes.
 case class DataDesc(name: String, shape: Shape,
-                    dtype: DType = Base.MX_REAL_TYPE, layout: String = "NCHW") {
-  require(shape.length == layout.length, ("number of dimensions in shape :%d with" +
+                    dtype: DType = DType.Float32, layout: String = Layout.UNDEFINED) {
+  require(layout == Layout.UNDEFINED || shape.length == layout.length,
+    ("number of dimensions in shape :%d with" +
     " shape: %s should match the length of the layout: %d with layout: %s").
     format(shape.length, shape.toString, layout.length, layout))
 
@@ -240,6 +382,8 @@ case class DataDesc(name: String, shape: Shape,
 }
 
 object DataDesc {
+
+  private val logger = LoggerFactory.getLogger(classOf[DataDesc])
   /**
    * Get the dimension that corresponds to the batch size.
    * @param layout layout string. For example, "NCHW".
@@ -249,10 +393,24 @@ object DataDesc {
    *         for each data-parallelism device.
    */
   def getBatchAxis(layout: Option[String]): Int = {
-    layout.map(_.indexOf('N')).getOrElse(0)
+    if (layout.isEmpty|| layout.get == Layout.UNDEFINED) {
+      logger.warn("Found Undefined Layout, will use default index 0 for batch axis")
+      0
+    } else {
+      if (layout.get.contains('N')) {
+        layout.get.indexOf("N")
+      } else {
+        throw new IllegalArgumentException("no Batch Axis('N') found in Layout!")
+      }
+    }
   }
 
+  @deprecated
   implicit def ListMap2Descs(shapes: ListMap[String, Shape]): IndexedSeq[DataDesc] = {
-    shapes.map { case (k, s) => new DataDesc(k, s) }.toIndexedSeq
+    if (shapes != null) {
+      shapes.map { case (k, s) => new DataDesc(k, s) }.toIndexedSeq
+    } else {
+      null
+    }
   }
 }

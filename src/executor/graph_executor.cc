@@ -32,12 +32,16 @@
 #include "./graph_executor.h"
 #include "../profiler/profiler.h"
 #include "../common/utils.h"
+#include "../common/exec_utils.h"
 
 namespace mxnet {
 namespace exec {
 
+using namespace mxnet::common;
+
 GraphExecutor::GraphExecutor() {
   log_verbose_ = dmlc::GetEnv("MXNET_EXEC_VERBOSE_LOGGING", false);
+  need_grad_ = false;
 }
 
 GraphExecutor::~GraphExecutor() {
@@ -54,30 +58,6 @@ GraphExecutor::~GraphExecutor() {
   }
 }
 
-inline NDArray InitZeros(const NDArrayStorageType stype, const TShape &shape,
-                                const Context &ctx, const int dtype) {
-  // NDArray with default storage
-  if (stype == kDefaultStorage) {
-    NDArray ret(shape, ctx, false, dtype);
-    ret = 0;
-    return ret;
-  }
-  // NDArray with non-default storage. Storage allocation is always delayed.
-  return NDArray(stype, shape, ctx, true, dtype);
-}
-
-inline void EmplaceBackZeros(const NDArrayStorageType stype, const TShape &shape,
-                             const Context &ctx, const int dtype,
-                             std::vector<NDArray> *vec) {
-  // NDArray with default storage
-  if (stype == kDefaultStorage) {
-    vec->emplace_back(shape, ctx, false, dtype);
-    vec->back() = 0;
-  } else {
-    // NDArray with non-default storage. Storage allocation is always delayed.
-    vec->emplace_back(stype, shape, ctx, true, dtype);
-  }
-}
 void GraphExecutor::Forward(bool is_train) {
   RunOps(is_train, 0, num_forward_nodes_);
 }
@@ -256,11 +236,11 @@ nnvm::Graph GraphExecutor::InitFullGraph(nnvm::Symbol symbol,
 
   nnvm::Graph g;
   g.outputs = symbol.outputs;
-  bool need_grad = false;
+  need_grad_ = false;
   for (OpReqType req : grad_req_types) {
-    if (req != kNullOp) need_grad = true;
+    if (req != kNullOp) need_grad_ = true;
   }
-  if (!need_grad) return g;
+  if (!need_grad_) return g;
   for (size_t i = 0; i < g.outputs.size(); ++i) {
     NodeEntry ngrad{nnvm::Node::Create(), 0, 0};
     head_grad_entry_.emplace_back(AttrHint(ngrad, g.outputs[i]));
@@ -304,204 +284,6 @@ nnvm::Graph GraphExecutor::InitFullGraph(nnvm::Symbol symbol,
     g.outputs.push_back(e);
   }
   return g;
-}
-
-/*!
- * \brief Assign context to the graph.
- * This is triggered by both simple_bind and bind flows.
- */
-static Graph AssignContext(Graph g,
-                    const Context& default_ctx,
-                    const std::map<std::string, Context>& ctx_map,
-                    const std::vector<Context>& in_arg_ctxes,
-                    const std::vector<Context>& arg_grad_ctxes,
-                    const std::vector<Context>& aux_state_ctxes,
-                    const std::vector<OpReqType>& grad_req_types,
-                    size_t num_forward_inputs,
-                    size_t num_forward_outputs) {
-  const auto& idx = g.indexed_graph();
-  const auto& mutable_nodes = idx.mutable_input_nodes();
-  // default use default context.
-  if (ctx_map.size() == 0) {
-    g.attrs["context"] = std::make_shared<nnvm::any>(
-        ContextVector(idx.num_nodes(), default_ctx));
-    for (const auto& x : in_arg_ctxes) {
-      CHECK(x == default_ctx)
-        << "Input array is in " << x << " while binding with ctx=" << default_ctx
-        << ". All arguments must be in global context (" << default_ctx
-        << ") unless group2ctx is specified for cross-device graph.";
-    }
-    for (const auto& x : arg_grad_ctxes) {
-      CHECK(x == default_ctx)
-        << "Gradient array is in " << x << " while binding with ctx="
-        << default_ctx << ". All gradients must be in global context (" << default_ctx
-        << ") unless group2ctx is specified for cross-device graph.";
-    }
-    return g;
-  }
-
-  // otherwise, use context assignment.
-  std::map<Context, int> ctx2id;  // map ctx to device id
-  std::vector<Context> ctx_list;  // index is device id
-  nnvm::DeviceVector device(idx.num_nodes(), -1);  // index is node id
-  nnvm::DeviceAssignMap device_map;  // map arg name to device id
-
-  // loop through the user input ctx_map and
-  // populate maps and lists
-  for (auto &kv : ctx_map) {
-    if (ctx2id.count(kv.second) == 0) {  // if context has no device id, create one
-      ctx2id[kv.second] = static_cast<int>(ctx_list.size());  // assign device id to ctx
-      ctx_list.push_back(kv.second);  // save ctx to the list
-    }
-    // assign device id to to the arg name with the corresponding ctx
-    device_map[kv.first] = ctx2id.at(kv.second);
-  }
-
-  // loop through all the rest of input nodes not specified
-  // in the ctx_map and populate maps and lists
-  size_t arg_top = 0, aux_top = 0;
-  for (size_t i = 0; i < num_forward_inputs; ++i) {
-    const uint32_t nid = idx.input_nodes().at(i);
-    Context ctx;
-    if (mutable_nodes.count(nid)) {  // aux node is mutable
-      CHECK_LT(aux_top, aux_state_ctxes.size());
-      ctx = aux_state_ctxes[aux_top];
-      ++aux_top;
-    } else {  // regular input node is immutable
-      CHECK_LT(arg_top, in_arg_ctxes.size());
-      ctx = in_arg_ctxes[arg_top];
-      ++arg_top;
-    }
-    if (ctx2id.count(ctx) == 0) {  // if the current ctx is not in the map of ctx and device id
-      ctx2id[ctx] = static_cast<int>(ctx_list.size());  // assign the current ctx with device id
-      ctx_list.push_back(ctx);  // save the current ctx in the list
-    }
-    device[nid] = ctx2id.at(ctx);  // assign device id to the current node
-  }
-
-  // loop through backward input nodes and populate maps and lists
-  // the backward input nodes is the gradient of the loss wrt the output
-  size_t arg_grad_offset = 0;
-  // keep an offset into the arg_grad_ctxes vector,
-  // since g.outputs exclude arg_grad whose req == null
-  CHECK_GE(grad_req_types.size(), g.outputs.size() - num_forward_outputs)
-           << "insufficient number of grad_reqs";
-  for (size_t i = num_forward_outputs; i < g.outputs.size(); ++i, ++arg_grad_offset) {
-    while (grad_req_types[arg_grad_offset] == kNullOp) ++arg_grad_offset;
-    const uint32_t nid = idx.outputs()[i].node_id;
-    Context ctx = arg_grad_ctxes[arg_grad_offset];
-    if (ctx2id.count(ctx) == 0) {
-      ctx2id[ctx] = static_cast<int>(ctx_list.size());
-      ctx_list.push_back(ctx);
-    }
-    int devid = ctx2id.at(ctx);
-    if (device[nid] != -1) {
-      CHECK_EQ(device[nid], devid) << "device of same output not equal to each other";
-    } else {
-      device[nid] = devid;
-    }
-  }
-
-  g.attrs["device"] = std::make_shared<dmlc::any>(std::move(device));
-  g = nnvm::pass::PlaceDevice(g, "__ctx_group__", device_map, "_CrossDeviceCopy");
-  const auto& assigned_device = g.GetAttr<nnvm::DeviceVector>("device");
-
-  ContextVector vcontext;
-  for (size_t i = 0; i < assigned_device.size(); ++i) {
-    if (assigned_device[i] == -1) {
-      vcontext.push_back(default_ctx);
-    } else {
-      vcontext.push_back(ctx_list[assigned_device[i]]);
-    }
-  }
-
-  // after device planning, we should check again
-  // if the assigned device of gradient node
-  // corresponds to storage of grads
-  auto &new_idx = g.indexed_graph();
-  arg_grad_offset = 0;
-  for (size_t i = num_forward_outputs; i < g.outputs.size(); ++i, ++arg_grad_offset) {
-    while (grad_req_types[arg_grad_offset] == kNullOp) ++arg_grad_offset;
-    const uint32_t nid = new_idx.outputs()[i].node_id;
-    Context ctx = arg_grad_ctxes[arg_grad_offset];
-    CHECK(ctx == vcontext[nid])
-      << "Trying to save gradient to " << ctx
-      << " while its source node \"" << new_idx[nid].source->attrs.name
-      << "\" computes it on " << vcontext[nid]
-      << ". Check your ctx in NDArray allocation.";
-  }
-
-  g.attrs["context"] = std::make_shared<nnvm::any>(std::move(vcontext));
-  return g;
-}
-
-static void HandleInferShapeError(const size_t num_forward_inputs,
-                           const nnvm::IndexedGraph& idx,
-                           const nnvm::ShapeVector& inferred_shapes) {
-  int cnt = 10;
-  std::ostringstream oss;
-  for (size_t i = 0; i < num_forward_inputs; ++i) {
-    const uint32_t nid = idx.input_nodes().at(i);
-    const uint32_t eid = idx.entry_id(nid, 0);
-    const TShape& inferred_shape = inferred_shapes[eid];
-    if (inferred_shape.ndim() == 0 || inferred_shape.Size() == 0U) {
-      const std::string& arg_name = idx[nid].source->attrs.name;
-      oss << arg_name << ": " << inferred_shape << ", ";
-      if (--cnt == 0) {
-        oss << "...";
-        break;
-      }
-    }
-  }
-  LOG(FATAL) << "InferShape pass cannot decide shapes for the following arguments "
-                "(0s means unknown dimensions). Please consider providing them as inputs:\n"
-             << oss.str();
-}
-
-static void HandleInferTypeError(const size_t num_forward_inputs,
-                          const nnvm::IndexedGraph& idx,
-                          const nnvm::DTypeVector& inferred_dtypes) {
-  int cnt = 10;
-  std::ostringstream oss;
-  for (size_t i = 0; i < num_forward_inputs; ++i) {
-    const uint32_t nid = idx.input_nodes().at(i);
-    const uint32_t eid = idx.entry_id(nid, 0);
-    const int inferred_dtype = inferred_dtypes[eid];
-    if (inferred_dtype == -1) {
-      const std::string& arg_name = idx[nid].source->attrs.name;
-      oss << arg_name << ": " << inferred_dtype << ", ";
-      if (--cnt == 0) {
-        oss << "...";
-        break;
-      }
-    }
-  }
-  LOG(FATAL) << "InferType pass cannot decide dtypes for the following arguments "
-                "(-1 means unknown dtype). Please consider providing them as inputs:\n"
-             << oss.str();
-}
-
-static void HandleInferStorageTypeError(const size_t num_forward_inputs,
-                                 const nnvm::IndexedGraph& idx,
-                                 const StorageTypeVector& inferred_stypes) {
-  int cnt = 10;
-  std::ostringstream oss;
-  for (size_t i = 0; i < num_forward_inputs; ++i) {
-    const uint32_t nid = idx.input_nodes().at(i);
-    const uint32_t eid = idx.entry_id(nid, 0);
-    const int inferred_stype = inferred_stypes[eid];
-    if (inferred_stype == -1) {
-      const std::string& arg_name = idx[nid].source->attrs.name;
-      oss << arg_name << ": " << common::stype_string(inferred_stype) << ", ";
-      if (--cnt == 0) {
-        oss << "...";
-        break;
-      }
-    }
-  }
-  LOG(FATAL) << "InferStorageType pass cannot decide storage type for the following arguments "
-                "(-1 means unknown stype). Please consider providing them as inputs:\n"
-             << oss.str();
 }
 
 /*!
@@ -679,57 +461,6 @@ void GraphExecutor::InitArguments(const nnvm::IndexedGraph& idx,
 }
 
 /*!
- * \brief If the requested ndarray's shape size is less than
- * the corresponding shared_data_array's shape size and the
- * storage type is shareable, reuse the memory allocation
- * in shared_buffer; otherwise, create a zero ndarray.
- * Shareable storages include both default storage and row_sparse storage
- * if enable_row_sparse_sharing is `True`, otherwise default storage only.
- */
-static NDArray ReshapeOrCreate(const std::string& name,
-                        const TShape& dest_arg_shape,
-                        const int dest_arg_dtype,
-                        const NDArrayStorageType dest_arg_stype,
-                        const Context& ctx,
-                        std::unordered_map<std::string, NDArray>* shared_buffer,
-                        bool enable_row_sparse_sharing) {
-  bool stype_shareable = dest_arg_stype == kDefaultStorage;
-  if (enable_row_sparse_sharing) {
-    stype_shareable = stype_shareable || dest_arg_stype == kRowSparseStorage;
-  }
-  auto it = shared_buffer->find(name);
-  if (it != shared_buffer->end()) {
-    // check if size is large enough for sharing
-    bool size_shareable = it->second.shape().Size() >= dest_arg_shape.Size();
-    if (size_shareable && stype_shareable) {  // memory can be reused
-      CHECK_EQ(it->second.dtype(), dest_arg_dtype)
-        << "Requested arg array's dtype does not match that of the reusable ndarray";
-      CHECK_EQ(it->second.storage_type(), dest_arg_stype)
-        << "Requested arg array's stype does not match that of the reusable ndarray";
-      return it->second.Reshape(dest_arg_shape);
-    } else if (stype_shareable) {
-      LOG(WARNING) << "Bucketing: data " << name << " has a shape " << dest_arg_shape
-                   << ", which is larger than already allocated shape " << it->second.shape()
-                   << ". Need to re-allocate. Consider putting default bucket key to be "
-                   << "the bucket taking the largest input for better memory sharing.";
-      // size is not large enough, creating a larger one for sharing
-      // the NDArrays in shared_buffer are guaranteed to be of shareable storages
-      it->second = InitZeros(dest_arg_stype, dest_arg_shape, ctx, dest_arg_dtype);
-      return it->second;
-    } else {
-      // not shareable storage
-      return InitZeros(dest_arg_stype, dest_arg_shape, ctx, dest_arg_dtype);
-    }
-  } else {
-    auto ret = InitZeros(dest_arg_stype, dest_arg_shape, ctx, dest_arg_dtype);
-    if (stype_shareable) {
-      shared_buffer->emplace(name, ret);
-    }
-    return ret;
-  }  // if (it != shared_buffer->end())
-}
-
-/*!
  * \brief Initialize in_args, arg_grads, and aux_states
  * and their data_entry_ of the executor using
  * shared_buffer from DataParallelExecutorGroup
@@ -904,9 +635,14 @@ void GraphExecutor::FinishInitGraph(nnvm::Symbol symbol,
   }
   g = DetectInplaceAddTo(g);
 
-  g.attrs["saved_states"] = std::make_shared<nnvm::any>(std::move(saved_states_));
+  // log the static memory plan of the graph
+  static bool mem_log_verbose = dmlc::GetEnv("MXNET_MEM_PLAN_VERBOSE_LOGGING", false);
+  if (mem_log_verbose) {
+    common::LogMemoryPlan(g);
+  }
+
   g = AttachOpExecs(g);
-  g = AttachOpResources(g);
+  AttachOpResources(g);
   graph_ = std::move(g);
 
   if (shared_exec != nullptr) {
@@ -1038,6 +774,117 @@ void GraphExecutor::Init(nnvm::Symbol symbol,
 }
 
 /*!
+ * \brief Return a new executor with the same symbol and shared memory,
+ * but different input/output shapes.
+ * For runtime reshaping, variable length sequences, etc.
+ * The returned executor shares state with the current one,
+ * and cannot be used in parallel with it.
+ */
+Executor* GraphExecutor::Reshape(const bool partial_shaping,
+                                 const bool allow_up_sizing,
+                                 const Context& default_ctx,
+                                 const std::map<std::string, Context>& ctx_map,
+                                 const std::unordered_map<std::string, TShape>&
+                                   provided_arg_shapes,
+                                 std::vector<NDArray>* in_args,
+                                 std::vector<NDArray>* arg_grads,
+                                 std::vector<NDArray>* aux_states) {
+  nnvm::Graph g;
+  g.outputs = std::vector<nnvm::NodeEntry>(graph_.outputs.begin(),
+    graph_.outputs.begin() + num_forward_outputs_);
+  nnvm::Symbol symbol;
+  symbol.outputs = g.outputs;
+  const nnvm::IndexedGraph& idx = g.indexed_graph();
+  nnvm::ShapeVector arg_shapes(idx.input_nodes().size(), TShape());
+  for (size_t i = 0; i < num_forward_inputs_; ++i) {
+    const uint32_t nid = idx.input_nodes().at(i);
+    const std::string& name = idx[nid].source->attrs.name;
+    auto it = provided_arg_shapes.find(name);
+    if (provided_arg_shapes.end() != it) {
+      arg_shapes[i] = it->second;
+    }
+  }
+  g = InferShape(std::move(g), std::move(arg_shapes), "__shape__");
+  if (g.GetAttr<size_t>("shape_num_unknown_nodes") != 0U) {
+    HandleInferShapeError(num_forward_inputs_, g.indexed_graph(),
+                          g.GetAttr<nnvm::ShapeVector>("shape"));
+  }
+  const nnvm::ShapeVector& shape_vec = g.GetAttr<nnvm::ShapeVector>("shape");
+  std::vector<OpReqType> grad_req_types;
+  size_t grad_top = 0;
+  const size_t num_args = in_arg_map_.size();
+  const size_t num_aux = aux_state_map_.size();
+  in_args->reserve(num_args);
+  grad_req_types.reserve(num_args);
+  arg_grads->reserve(num_args);
+  aux_states->reserve(num_aux);
+  for (uint32_t nid : idx.input_nodes()) {
+    std::string name = idx[nid].source->attrs.name;
+    const TShape& new_shape = shape_vec[idx.entry_id(nid, 0)];
+    if (idx.mutable_input_nodes().count(nid) == 0) {
+      NDArray& arr = in_arg_map_.at(name);
+      auto it = arg_grad_map_.find(name);
+      if (partial_shaping || provided_arg_shapes.count(name) || new_shape == arr.shape()) {
+        if (new_shape.Size() > arr.shape().Size()) {
+          CHECK(allow_up_sizing) << "New shape of arg: " << name << " is larger than original."
+            << "First making a big executor and then down sizing it "
+            << "is more efficient than the reverse."
+            << "If you really want to up size, set allow_up_sizing=True "
+            << "to enable allocation of new arrays.";
+          in_args->emplace_back(new_shape, arr.ctx(), false, arr.dtype());
+          if (it != arg_grad_map_.end()) {
+            NDArray& darr = it->second;
+            arg_grads->emplace_back(new_shape, darr.ctx(), false, darr.dtype());
+            grad_req_types.push_back(grad_store_.at(grad_top++).first);
+          } else {
+            arg_grads->emplace_back();
+            grad_req_types.push_back(kNullOp);
+          }
+        } else {
+          in_args->push_back(arr.Reshape(new_shape));
+          if (it != arg_grad_map_.end()) {
+            NDArray& darr = it->second;
+            arg_grads->push_back(darr.Reshape(new_shape));
+            grad_req_types.push_back(grad_store_.at(grad_top++).first);
+          } else {
+            arg_grads->emplace_back();
+            grad_req_types.push_back(kNullOp);
+          }
+        }
+      } else {
+        LOG(FATAL) << "Shape of unspecifie arg: " << name << " changed. "
+          << "This can cause the new executor to not share parameters "
+          << "with the old one. Please check for error in network."
+          << "If this is intended, set partial_shaping=True to suppress this warning.";
+      }
+    } else {
+      NDArray& arr = aux_state_map_.at(name);
+      if (partial_shaping || new_shape == arr.shape()) {
+        if (new_shape.Size() > arr.shape().Size()) {
+          CHECK(allow_up_sizing) << "New shape of arg: " << name << " is larger than original."
+            << "First making a big executor and then down sizing it "
+            << "is more efficient than the reverse."
+            << "If you really want to up size, set allow_up_sizing=True "
+            << "to enable allocation of new arrays.";
+          aux_states->emplace_back(new_shape, arr.ctx(), false, arr.dtype());
+        } else {
+          aux_states->push_back(arr.Reshape(new_shape));
+        }
+      } else {
+        LOG(FATAL) << "Shape of unspecifie arg: " << name << " changed. "
+          << "This can cause the new executor to not share parameters "
+          << "with the old one. Please check for error in network."
+          << "If this is intended, set partial_shaping=True to suppress this warning.";
+      }
+    }
+  }
+  auto exec = new GraphExecutor();
+  exec->Init(symbol, default_ctx, ctx_map,
+             *in_args, *arg_grads, grad_req_types, *aux_states,
+             this);
+  return exec;
+}
+/*!
  * \brief This function is triggered by both simple_bind
  * and bind flows.
  * Setup backward graph, create device and context
@@ -1164,7 +1011,7 @@ void GraphExecutor::InitDataEntryMemory(std::vector<NDArray>* shared_pool) {
   for (size_t i = 0; i < pool_info.size(); i++) {
     sorted_pool_index.push_back(i);
   }
-  auto pool_comparator = [&pool_info](int lhs, int rhs){
+  auto pool_comparator = [&pool_info](size_t lhs, size_t rhs){
     return pool_info[lhs].bytes > pool_info[rhs].bytes;
   };
   std::sort(sorted_pool_index.begin(), sorted_pool_index.end(), pool_comparator);
@@ -1264,7 +1111,7 @@ void GraphExecutor::InitCachedOps() {
       }
     }
   }
-  // Note that this modifies the requirment of kWriteInplace
+  // Note that this modifies the requirement of kWriteInplace
   for (size_t j = num_forward_outputs_; j < idx.outputs().size(); ++j) {
     auto& e = idx.outputs()[j];
     op_nodes_[e.node_id].exec->req[e.index] =
@@ -1474,6 +1321,7 @@ void GraphExecutor::RunOps(bool is_train, size_t topo_start, size_t topo_end) {
     const auto& inode = idx[nid];
     if (inode.source->is_variable()) continue;
     opnode.exec->op_ctx.is_train = is_train;
+    opnode.exec->op_ctx.need_grad = need_grad_;
   }
 
   // Push Ops
@@ -1492,11 +1340,15 @@ void GraphExecutor::RunOps(bool is_train, size_t topo_start, size_t topo_end) {
     OpNode& opnode = op_nodes_[nid];
     if (op_nodes_[nid].skip_exec_node) continue;
     opnode.exec->op_ctx.is_train = is_train;
+    opnode.exec->op_ctx.need_grad = need_grad_;
     if (opnode.exec->exec_type() == ExecType::kCrossDeviceCopy) {
       CHECK_EQ(inode.inputs.size(), 1U);
       CHECK_EQ(opnode.exec->in_array.size(), 1U);
       CHECK_EQ(opnode.exec->out_array.size(), 1U);
       CopyFromTo(opnode.exec->in_array[0], &(opnode.exec->out_array[0]));
+    } else if (opnode.exec->exec_type() == ExecType::kSubgraphExec) {
+      // If the node contains a subgraph, we can't execute it in the engine.
+      opnode.exec->Run(opnode.exec->op_ctx.run_ctx, false);
     } else if (opnode.cached_opr != nullptr) {
       bool profiling = profiler::Profiler::Get()->GetState() == profiler::Profiler::kRunning;
       Engine::Get()->Push(opnode.cached_opr, opnode.ctx, 0, profiling);

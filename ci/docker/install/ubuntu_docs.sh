@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -21,8 +21,14 @@
 # the whole docker cache for the image
 
 set -ex
-wget http://downloads.lightbend.com/scala/2.11.8/scala-2.11.8.deb && \
-    dpkg -i scala-2.11.8.deb && rm scala-2.11.8.deb
+# Install dependencies
+echo 'Installing dependencies...'
+apt-get update || true
+apt-get install -y \
+    doxygen \
+    pandoc
 
-apt-get install -y doxygen libatlas-base-dev graphviz pandoc
-pip install sphinx==1.3.5 CommonMark==0.5.4 breathe mock recommonmark pypandoc beautifulsoup4
+pip3 install -r /work/docs_requirements
+pip2 install -r /work/docs_requirements
+
+echo 'Dependency installation complete.'
